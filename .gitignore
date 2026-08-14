@@ -16,6 +16,10 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
+# 临时下载 / 调试目录
+tmp*/
+.tmp/
+
 # 运行输出（保留目录）
 output/*
 !output/.gitkeep
@@ -25,9 +29,7 @@ input/*
 !input/.gitkeep
 !input/sample.srt
 
-# 模型大文件与下载缓存（保留 models/*/ 目录说明）
-models/**/model.bin
-models/**/*.bin
-models/**/.cache/
-models/**/.idea/
-models/**/.gitattributes
+# 模型全部不进 git（只保留 models/README.md 说明）
+models/*
+!models/README.md
+!models/.gitkeep

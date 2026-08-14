@@ -1,8 +1,9 @@
 # =============================================================================
 # 字幕翻译测试配置
 # -----------------------------------------------------------------------------
-# 切换模型：改 active_model 为下面 models 里的某个 id，或命令行：
+# 切换模型：改 active_model，或命令行：
 #   python translate_srt.py --model-id nllb-600m-int8
+#   python translate_srt.py --model-id m2m100-418m-int8
 # =============================================================================
 
 # 当前默认使用的模型 id（必须在 models 里存在）
@@ -22,28 +23,21 @@ defaults:
 # -----------------------------------------------------------------------------
 # 已注册模型列表
 # path 相对本配置文件所在目录（项目根目录）
-# type 决定用哪套加载逻辑；目前支持：
-#   - ctranslate2-nllb  : CTranslate2 版 NLLB（当前这套）
-# 以后加新模型：把权重放到 models/<名字>/，再在这里加一段即可
+# type:
+#   - ctranslate2-nllb   : NLLB（语言码如 jpn_Jpan / zho_Hans）
+#   - ctranslate2-m2m100 : M2M100（语言码如 ja / zh / en）
 # -----------------------------------------------------------------------------
 models:
   nllb-600m-int8:
     name: NLLB-200 Distilled 600M (CTranslate2 INT8)
     type: ctranslate2-nllb
     path: models/nllb-600m-int8
-    src: eng_Latn       # 默认源语言
-    tgt: zho_Hans       # 默认目标语言
-    # 下面几项可省略，省略则用上面的 defaults
-    # device: auto
-    # compute_type: auto
-    # beam_size: 2
-    # batch_size: 32
+    src: eng_Latn
+    tgt: zho_Hans
 
-  # 示例：以后加入第二个模型时，取消注释并改路径
-  # my-other-model:
-  #   name: My Other Translator
-  #   type: ctranslate2-nllb
-  #   path: models/my-other-model
-  #   src: eng_Latn
-  #   tgt: zho_Hans
-  #   beam_size: 1
+  m2m100-418m-int8:
+    name: M2M100 418M (CTranslate2 INT8)
+    type: ctranslate2-m2m100
+    path: models/m2m100-418m-int8
+    src: ja                 # M2M100 用短码：ja/zh/en ...
+    tgt: zh

@@ -3,7 +3,9 @@
 字幕翻译测试脚本（SRT → SRT）
 
 通过 config.yaml 管理多个本地模型：改 active_model 或 --model-id 即可切换。
-当前内置后端：CTranslate2 NLLB（type: ctranslate2-nllb）。
+当前内置后端：
+  - ctranslate2-nllb   （NLLB）
+  - ctranslate2-m2m100 （M2M100）
 
 典型流程：
   1. 读取配置，解析要用的模型
@@ -16,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -53,7 +56,44 @@ COMMON_LANGS = """
 """.strip()
 
 # 目前支持的模型 type；以后加新后端时在这里扩展
-SUPPORTED_TYPES = {"ctranslate2-nllb"}
+SUPPORTED_TYPES = {"ctranslate2-nllb", "ctranslate2-m2m100"}
+
+# M2M100 常用短语言码（和 NLLB 的 eng_Latn 不同）
+COMMON_LANGS_M2M = """
+  en  English
+  zh  Chinese
+  ja  Japanese
+  ko  Korean
+  fr  French
+  de  German
+  es  Spanish
+  ru  Russian
+  pt  Portuguese
+  it  Italian
+  vi  Vietnamese
+  th  Thai
+  ar  Arabic
+  hi  Hindi
+""".strip()
+
+# 方便从 NLLB 语言码映射到 M2M100（传错时自动纠正）
+NLLB_TO_M2M100 = {
+    "eng_Latn": "en",
+    "zho_Hans": "zh",
+    "zho_Hant": "zh",
+    "jpn_Jpan": "ja",
+    "kor_Hang": "ko",
+    "fra_Latn": "fr",
+    "deu_Latn": "de",
+    "spa_Latn": "es",
+    "rus_Cyrl": "ru",
+    "por_Latn": "pt",
+    "ita_Latn": "it",
+    "vie_Latn": "vi",
+    "tha_Thai": "th",
+    "ara_Arab": "ar",
+    "hin_Deva": "hi",
+}
 
 
 def format_duration(seconds: float) -> str:
@@ -294,11 +334,164 @@ class NllbTranslator:
         return [o if o is not None else "" for o in outputs], stats
 
 
-def build_translator(settings: dict[str, Any]) -> NllbTranslator:
-    """按 type 创建翻译器；以后加其他后端在这里分支即可。"""
+class M2m100Translator:
+    """
+    封装 CTranslate2 M2M100 模型的加载与批量翻译。
+
+    只依赖 sentencepiece（不需要 transformers / PyTorch）：
+    M2M100 的语言标记形如 __ja__ / __zh__，直接作为 token 传给 CTranslate2。
+    """
+
+    def __init__(
+        self,
+        model_dir: Path,
+        device: str = "auto",
+        compute_type: str = "auto",
+        inter_threads: int = 1,
+        intra_threads: int = 0,
+    ) -> None:
+        model_dir = model_dir.resolve()
+        sp_path = model_dir / "sentencepiece.bpe.model"
+        vocab_path = model_dir / "shared_vocabulary.json"
+
+        if not (model_dir / "model.bin").exists():
+            raise FileNotFoundError(f"model.bin not found in {model_dir}")
+        if not sp_path.exists():
+            raise FileNotFoundError(f"sentencepiece.bpe.model not found in {model_dir}")
+
+        if device == "auto":
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.load(str(sp_path))
+
+        # 从词表里收集所有 __xx__ 语言标记，用于校验语言码
+        self.lang_tokens: set[str] = set()
+        if vocab_path.exists():
+            with vocab_path.open(encoding="utf-8") as f:
+                vocab = json.load(f)
+            tokens = vocab.keys() if isinstance(vocab, dict) else vocab
+            self.lang_tokens = {
+                t for t in tokens if t.startswith("__") and t.endswith("__")
+            }
+
+        self.translator = ctranslate2.Translator(
+            str(model_dir),
+            device=device,
+            compute_type=compute_type,
+            inter_threads=inter_threads,
+            intra_threads=intra_threads,
+        )
+        self.device = device
+
+    @staticmethod
+    def normalize_lang(code: str) -> str:
+        """把 NLLB 风格语言码转成 M2M100 短码；已是短码则原样返回。"""
+        return NLLB_TO_M2M100.get(code.strip(), code.strip())
+
+    def lang_token(self, code: str) -> str:
+        """短码 → M2M100 语言标记，例如 ja → __ja__。"""
+        token = f"__{code}__"
+        if self.lang_tokens and token not in self.lang_tokens:
+            sample = ", ".join(sorted(self.lang_tokens)[:12])
+            raise SystemExit(
+                f"[error] M2M100 不支持语言码 '{code}'（{token} 不在词表）。"
+                f" 例如: {sample} ..."
+            )
+        return token
+
+    def translate_texts(
+        self,
+        texts: list[str],
+        src_lang: str,
+        tgt_lang: str,
+        beam_size: int = 2,
+        batch_size: int = 32,
+        max_decoding_length: int = 256,
+    ) -> tuple[list[str], dict[str, float | int]]:
+        """
+        M2M100 + CTranslate2 输入格式：
+          source = [__src__] + SentencePiece子词 + </s>
+          target_prefix = [__tgt__]
+        语言码用短码：ja / zh / en ...
+        """
+        src_token = self.lang_token(self.normalize_lang(src_lang))
+        tgt_token = self.lang_token(self.normalize_lang(tgt_lang))
+
+        stats: dict[str, float | int] = {
+            "num_cues": len(texts),
+            "num_translated": 0,
+            "encode_s": 0.0,
+            "infer_s": 0.0,
+            "decode_s": 0.0,
+            "total_s": 0.0,
+        }
+        if not texts:
+            return [], stats
+
+        t_all = time.perf_counter()
+        outputs: list[str | None] = [None] * len(texts)
+        nonempty_idx: list[int] = []
+        source_tokens: list[list[str]] = []
+
+        t0 = time.perf_counter()
+        for i, text in enumerate(texts):
+            stripped = text.strip()
+            if not stripped:
+                outputs[i] = text
+                continue
+            pieces = self.sp.encode(stripped, out_type=str)
+            source_tokens.append([src_token] + pieces + ["</s>"])
+            nonempty_idx.append(i)
+        stats["encode_s"] = time.perf_counter() - t0
+        stats["num_translated"] = len(source_tokens)
+
+        if not source_tokens:
+            stats["total_s"] = time.perf_counter() - t_all
+            return [o if o is not None else "" for o in outputs], stats
+
+        target_prefix = [[tgt_token]] * len(source_tokens)
+
+        t0 = time.perf_counter()
+        results = self.translator.translate_batch(
+            source_tokens,
+            target_prefix=target_prefix,
+            beam_size=beam_size,
+            batch_type="examples",
+            max_batch_size=batch_size,
+            max_decoding_length=max_decoding_length,
+        )
+        stats["infer_s"] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for idx, result in zip(nonempty_idx, results):
+            hyp = result.hypotheses[0]
+            if hyp and hyp[0] == tgt_token:
+                hyp = hyp[1:]
+            hyp = [
+                t
+                for t in hyp
+                if t not in {"<unk>", "<s>", "</s>", "<pad>"}
+                and not (t.startswith("__") and t.endswith("__"))
+            ]
+            outputs[idx] = self.sp.decode(hyp)
+        stats["decode_s"] = time.perf_counter() - t0
+        stats["total_s"] = time.perf_counter() - t_all
+
+        return [o if o is not None else "" for o in outputs], stats
+
+
+def build_translator(settings: dict[str, Any]) -> NllbTranslator | M2m100Translator:
+    """按 type 创建翻译器。"""
     mtype = settings["type"]
     if mtype == "ctranslate2-nllb":
         return NllbTranslator(
+            model_dir=settings["path"],
+            device=settings["device"],
+            compute_type=settings["compute_type"],
+        )
+    if mtype == "ctranslate2-m2m100":
+        return M2m100Translator(
             model_dir=settings["path"],
             device=settings["device"],
             compute_type=settings["compute_type"],
@@ -319,7 +512,7 @@ def write_srt(path: Path, subs: list[srt.Subtitle]) -> None:
 
 
 def translate_srt_file(
-    translator: NllbTranslator,
+    translator: NllbTranslator | M2m100Translator,
     input_path: Path,
     output_path: Path,
     src_lang: str,
@@ -400,7 +593,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Translate SRT subtitle files with local models (config.yaml).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"Common language codes:\n{COMMON_LANGS}",
+        epilog=(
+            f"NLLB language codes:\n{COMMON_LANGS}\n\n"
+            f"M2M100 language codes:\n{COMMON_LANGS_M2M}"
+        ),
     )
     parser.add_argument(
         "--config",
