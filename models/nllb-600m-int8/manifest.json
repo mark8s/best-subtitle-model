@@ -1,0 +1,12 @@
+{
+  "modelId": "nllb-200",
+  "version": "v1",
+  "displayName": "NLLB-200 (600M distilled, int8)",
+  "totalBytes": 630477782,
+  "files": [
+    { "name": "model.bin", "bytes": 619704329, "sha256": "ca3362e6e81906c0cf9c33bd6917674222c71d69617d0afb18507ce0b6c2e2e8" },
+    { "name": "sentencepiece.bpe.model", "bytes": 4852054, "sha256": "14bb8dfb35c0ffdea7bc01e56cea38b9e3d5efcdcb9c251d6b40538e1aab555a" },
+    { "name": "shared_vocabulary.json", "bytes": 5921176, "sha256": "af53bfd0e6f726209e7325e45b87ab3b14e5856f7d42d7b9be91de3287c45267" },
+    { "name": "config.json", "bytes": 223, "sha256": "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af" }
+  ]
+}

@@ -1,0 +1,5 @@
+ctranslate2>=4.0.0
+sentencepiece>=0.1.99
+srt>=3.5.3
+tqdm>=4.66.0
+PyYAML>=6.0

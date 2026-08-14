@@ -1,0 +1,11 @@
+1
+00:00:01,000 --> 00:00:04,000
+Hello, welcome to the subtitle translation test.
+
+2
+00:00:04,500 --> 00:00:08,000
+This is a simple demo to check the NLLB model quality.
+
+3
+00:00:08,500 --> 00:00:12,000
+Please put your own SRT files into the input folder.

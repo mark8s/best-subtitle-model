@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 运行输出（保留目录）
+output/*
+!output/.gitkeep
+
+# 测试字幕输入（保留示例）
+input/*
+!input/.gitkeep
+!input/sample.srt
+
+# 模型大文件与下载缓存（保留 models/*/ 目录说明）
+models/**/model.bin
+models/**/*.bin
+models/**/.cache/
+models/**/.idea/
+models/**/.gitattributes
