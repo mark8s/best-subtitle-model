@@ -5,17 +5,13 @@
 ```
 models/
   nllb-600m-int8/
-    model.bin
-    sentencepiece.bpe.model
-    shared_vocabulary.json
-    config.json
-  another-model/
-    ...
+  m2m100-418m-int8/
+  faster-whisper-large-v3/   # 可选；不放则 faster-whisper 自动缓存下载
 ```
 
-然后在项目根目录的 `config.yaml` 里注册，并设置 `active_model`。
+翻译模型在根目录 `config.yaml` 注册；ASR 用独立脚本 `transcribe_audio.py`，不必注册。
 
-CTranslate2 NLLB 模型至少需要：
+CTranslate2 NLLB / M2M100 至少需要：
 
 - `model.bin`
 - `sentencepiece.bpe.model`

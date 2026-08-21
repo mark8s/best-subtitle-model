@@ -3,3 +3,4 @@ sentencepiece>=0.1.99
 srt>=3.5.3
 tqdm>=4.66.0
 PyYAML>=6.0
+faster-whisper>=1.0.0
