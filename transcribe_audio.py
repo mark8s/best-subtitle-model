@@ -22,17 +22,20 @@ from pathlib import Path
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_MODEL_NAME = "large-v3"
+DEFAULT_LOCAL_MODEL_DIR = ROOT / "models" / "faster-whisper-large-v3"
 
 # 常用 Whisper 模型名（faster-whisper 会从 Hugging Face 自动下载到缓存）
-# 本地目录也可：--model models/faster-whisper-large-v3
+# 项目内有 models/faster-whisper-large-v3 时默认走本地，无需 --model
 COMMON_MODELS = """
   tiny / tiny.en
   base / base.en
   small / small.en
   medium / medium.en
   large-v2
-  large-v3          # 效果最好，也最慢最大
-  distil-large-v3   # 蒸馏版，更快
+  large-v3                # 默认；效果最好，也最慢最大
+  large-v3-turbo / turbo  # 更快，质量通常不如 large-v3
+  distil-large-v3         # 蒸馏版，更快
 """.strip()
 
 
@@ -56,19 +59,18 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
-def write_srt(path: Path, segments: list[tuple[float, float, str]]) -> None:
-    """把 (start, end, text) 列表写成 SRT。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    for i, (start, end, text) in enumerate(segments, start=1):
-        text = text.strip()
-        if not text:
-            continue
-        lines.append(str(i))
-        lines.append(f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}")
-        lines.append(text)
-        lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+def partial_output_path(path: Path) -> Path:
+    """正式输出旁边的增量字幕，例如 movie.partial.srt。"""
+    return path.with_name(f"{path.stem}.partial{path.suffix}")
+
+
+def format_srt_entry(index: int, start: float, end: float, text: str) -> str:
+    """格式化一个完整 SRT 条目。"""
+    return (
+        f"{index}\n"
+        f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n"
+        f"{text.strip()}\n\n"
+    )
 
 
 def resolve_device(device: str) -> str:
@@ -98,6 +100,31 @@ def default_output_path(audio: Path, output: Path | None) -> Path:
     return output
 
 
+def is_ct2_model_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "model.bin").is_file()
+
+
+def resolve_model_id(model: str) -> str:
+    """优先用本地目录，避免无网机器去 Hugging Face 下载。"""
+    given = Path(model)
+    candidates = [given]
+    if not given.is_absolute():
+        candidates.extend([Path.cwd() / given, ROOT / given])
+    for path in candidates:
+        if is_ct2_model_dir(path):
+            return str(path.resolve())
+        if path.exists() and path.is_dir():
+            return str(path.resolve())
+
+    if model == DEFAULT_MODEL_NAME and is_ct2_model_dir(DEFAULT_LOCAL_MODEL_DIR):
+        return str(DEFAULT_LOCAL_MODEL_DIR.resolve())
+
+    named = ROOT / "models" / f"faster-whisper-{model}"
+    if is_ct2_model_dir(named):
+        return str(named.resolve())
+    return model
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Transcribe audio to SRT with faster-whisper (standalone ASR test).",
@@ -120,8 +147,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="small",
-        help="Model size name or local dir (default: small). e.g. large-v3 / models/xxx",
+        default=DEFAULT_MODEL_NAME,
+        help=(
+            "Model size name or local dir "
+            f"(default: {DEFAULT_MODEL_NAME}; uses models/faster-whisper-large-v3 if present)"
+        ),
     )
     parser.add_argument(
         "--language",
@@ -153,8 +183,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--vad",
-        action="store_true",
-        help="Enable VAD filter to skip silence (often cleaner timestamps)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable VAD to skip non-speech and reduce hallucinations (default: enabled; use --no-vad to disable)",
+    )
+    parser.add_argument(
+        "--condition-on-previous-text",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use previous output as context (default: disabled to avoid repeated hallucinations)",
     )
     parser.add_argument(
         "--word-timestamps",
@@ -190,11 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     device = resolve_device(args.device)
     compute_type = resolve_compute_type(device, args.compute_type)
 
-    # 模型可以是名字（自动下载）或本地目录
-    model_id = args.model
-    local = Path(model_id)
-    if local.exists():
-        model_id = str(local.resolve())
+    model_id = resolve_model_id(args.model)
 
     print(f"Audio      : {audio}")
     print(f"Output     : {out_path}")
@@ -202,7 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Device     : {device} | compute_type={compute_type}")
     print(f"Language   : {args.language or 'auto'}")
     print(f"Task       : {args.task}")
-    print(f"beam_size  : {args.beam_size} | vad={args.vad}")
+    print(
+        f"beam_size  : {args.beam_size} | vad={args.vad}"
+        f" | previous_text={args.condition_on_previous_text}"
+    )
     print("Loading model ...")
 
     t_load = time.perf_counter()
@@ -219,18 +255,38 @@ def main(argv: list[str] | None = None) -> int:
         task=args.task,
         beam_size=args.beam_size,
         vad_filter=args.vad,
+        condition_on_previous_text=args.condition_on_previous_text,
         word_timestamps=args.word_timestamps,
     )
 
-    # 迭代 segments 才会真正跑推理；用 list 收集并显示进度
-    collected: list[tuple[float, float, str]] = []
-    for seg in tqdm(segments_iter, desc="Transcribing", unit="seg"):
-        collected.append((seg.start, seg.end, seg.text))
-    infer_s = time.perf_counter() - t_infer
+    # 迭代 segments 才会真正跑推理。每段立即写入 partial，确保中断后可查看。
+    partial_path = partial_output_path(out_path)
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    written_segments = 0
+    write_s = 0.0
+    try:
+        with partial_path.open("w", encoding="utf-8", newline="\n") as output_file:
+            for seg in tqdm(segments_iter, desc="Transcribing", unit="seg"):
+                text = seg.text.strip()
+                if not text:
+                    continue
+                written_segments += 1
+                t_write = time.perf_counter()
+                output_file.write(
+                    format_srt_entry(written_segments, seg.start, seg.end, text)
+                )
+                output_file.flush()
+                write_s += time.perf_counter() - t_write
+    except KeyboardInterrupt:
+        print("\n" + "-" * 60, file=sys.stderr)
+        print(f"Transcription interrupted after {written_segments} segments.", file=sys.stderr)
+        print(f"Partial SRT saved: {partial_path}", file=sys.stderr)
+        return 130
 
+    infer_s = time.perf_counter() - t_infer
     t_write = time.perf_counter()
-    write_srt(out_path, collected)
-    write_s = time.perf_counter() - t_write
+    partial_path.replace(out_path)
+    write_s += time.perf_counter() - t_write
 
     audio_dur = float(getattr(info, "duration", 0.0) or 0.0)
     detected = getattr(info, "language", None)
@@ -239,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 60)
     print(f"Detected language : {detected}" + (f" ({lang_prob:.2f})" if lang_prob else ""))
     print(f"Audio duration    : {format_duration(audio_dur)}")
-    print(f"Segments          : {len(collected)}")
+    print(f"Segments          : {written_segments}")
     print(f"Wrote             : {out_path}")
     print("=" * 60)
     print("Timing summary")

@@ -6,7 +6,7 @@
 models/
   nllb-600m-int8/
   m2m100-418m-int8/
-  faster-whisper-large-v3/   # 可选；不放则 faster-whisper 自动缓存下载
+  faster-whisper-large-v3/        # 默认 ASR；存在且含 model.bin 时 transcribe_audio.py 自动用，不必 --model
 ```
 
 翻译模型在根目录 `config.yaml` 注册；ASR 用独立脚本 `transcribe_audio.py`，不必注册。

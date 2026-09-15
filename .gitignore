@@ -22,16 +22,7 @@ tmp*/
 wheels/
 *.whl
 
-# 运行输出（保留目录占位）
-output/*
-!output/.gitkeep
-
-# 测试输入：字幕/音视频都不提交（只留示例 srt）
-input/*
-!input/.gitkeep
-!input/sample.srt
-
-# 常见媒体（防漏网）
+# input/output 中的字幕可以提交；常见音视频全局忽略
 *.wav
 *.mp3
 *.m4a
