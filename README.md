@@ -234,7 +234,7 @@ python translate_srt.py \
 ```
  
 M2M100 测试（注意语言码不同）：
-
+  
 ```bash
 python translate_srt.py --model-id m2m100-418m-int8 \
   -i input/The.Pursuit.of.Happyness.ja.srt \
