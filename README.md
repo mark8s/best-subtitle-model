@@ -101,8 +101,12 @@ python transcribe_audio.py -i input/demo.mp3 -o output/demo.srt --device cpu
 python transcribe_audio.py -i input/demo.mp3 \
   --model models/faster-whisper-large-v3
 
-# 已知语言时指定更稳；--task translate = 译成英语字幕（不是译中文）
+# 已知语言时指定更稳（听写原语言字幕，不是译成中文）
+python transcribe_audio.py -i input/为奴十二年.wav --language en
+python transcribe_audio.py -i "input/为奴十二年-中文.wav" --language zh
 python transcribe_audio.py -i input/demo.wav --language it
+
+# --task translate = Whisper 自带「译成英语」，不是中文
 python transcribe_audio.py -i input/demo.wav --language it --task translate
 ```
 
@@ -126,6 +130,21 @@ output/movie.partial.srt
 
 **语言怎么定（重要）**
 
+`--language` 指定的是**音频里说的语言**，默认 `--task transcribe` 会生成**同语言字幕**：
+
+| 音频 | 命令 | 输出 |
+|---|---|---|
+| 英语对白 | `--language en` | 英文字幕 |
+| 中文对白 | `--language zh` | 中文字幕 |
+| 意大利语对白 | `--language it` | 意大利文字幕 |
+
+```bash
+python transcribe_audio.py -i input/为奴十二年.wav --language en
+python transcribe_audio.py -i "input/为奴十二年-中文.wav" --language zh
+```
+
+这不是「翻译成中文」。英语片要中文字幕：先 `--language en` 出英文字幕，再用 `translate_srt.py`。
+
 - 不写 `--language`：听开头约 30s 做语种分类，日志：`Detected language : xx (0.xx)`。
 - **置信度低（例如低于 0.7～0.8）不可信**，片头静音/配乐/多语混杂时容易检错；应抽对白片段再检，或人工指定后整片 `--language xx` 锁死。
 - 写了 `--language`：跳过检测。SRT **无语言字段**，以日志或文本为准。
@@ -140,9 +159,15 @@ output/movie.partial.srt
 
 **用 ffmpeg 抽 wav**（16kHz 单声道 PCM，给 Whisper 用）
 
+`-vn` = no video，不输出画面，只抽音频。
+
 ```bash
-# 整片
+# 整片（默认第一条音轨）
 ffmpeg -i input/movie.mkv -vn -acodec pcm_s16le -ar 16000 -ac 1 input/movie.wav
+
+# 指定音轨（例：stream index 2，中文 chi）
+ffmpeg -i "input/为奴十二年.2013.1080p.h265.mkv" -map 0:2 -vn \
+  -acodec pcm_s16le -ar 16000 -ac 1 "input/为奴十二年-中文.wav"
 
 # 只抽前 3 分钟（先检语种）
 ffmpeg -i input/movie.mkv -t 180 -vn -acodec pcm_s16le -ar 16000 -ac 1 input/clip.wav
@@ -207,7 +232,7 @@ python translate_srt.py \
   -o output/The.Pursuit.of.Happyness.zh2.srt \
   --src jpn_Jpan --tgt zho_Hans --device cpu
 ```
-
+ 
 M2M100 测试（注意语言码不同）：
 
 ```bash
