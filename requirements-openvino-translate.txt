@@ -1,13 +1,19 @@
 # Extra packages for Intel GPU NLLB translation (Optimum seq2seq).
 # Install into the same /DATA/ov-venv as Whisper. Do not mix into .venv.
 #
-# torch / torchvision must be installed from the CPU wheel index first
-# (see README). Do not add them here or pip may pull a mismatched build.
-#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-#   python -m pip install -r requirements-openvino-translate.txt
+# +cpu wheels live on the PyTorch CPU index. Pinning them here keeps torch
+# and torchvision on one ABI; a PyPI torchvision alone fails with
+# "operator torchvision::nms does not exist".
+--extra-index-url https://download.pytorch.org/whl/cpu
 -r requirements-openvino.txt
-transformers>=4.45.0
-optimum[openvino]
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+# optimum-intel 2.2 keeps huggingface-hub below 1.22. datasets 5.x needs a
+# newer hub and breaks `from optimum.intel import OVModelForSeq2SeqLM`.
+huggingface-hub>=0.24.0,<1.22
+datasets==3.6.0
+openvino-tokenizers==2026.4.0.0
+optimum-intel==2.2.0
 sentencepiece>=0.2.0
 srt>=3.5.0
 tqdm>=4.66.0

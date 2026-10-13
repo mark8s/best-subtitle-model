@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -47,12 +48,25 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        openvino_version = version("openvino")
+        optimum_intel_version = version("optimum-intel")
+        import openvino  # noqa: F401
         from transformers import AutoTokenizer
         from optimum.intel import OVModelForSeq2SeqLM
-    except ImportError:
+    except (ImportError, PackageNotFoundError):
         print(
-            "[error] 未安装 Optimum Intel。请激活 ov-venv 后执行:\n"
+            "[error] OpenVINO 翻译依赖没有装完整。请激活 ov-venv 后执行:\n"
             "  python -m pip install -r requirements-openvino-translate.txt",
+            file=sys.stderr,
+        )
+        return 1
+    if not openvino_version.startswith("2026.4.") or optimum_intel_version != "2.2.0":
+        print(
+            "[error] OpenVINO 翻译依赖版本不匹配："
+            f"openvino={openvino_version}, optimum-intel={optimum_intel_version}。\n"
+            "请执行: python -m pip install --upgrade "
+            "'openvino==2026.4.0' 'openvino-tokenizers==2026.4.0.0' "
+            "'optimum-intel==2.2.0'",
             file=sys.stderr,
         )
         return 1
@@ -82,10 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     model.save_pretrained(out_dir)
     print(f"Saved OpenVINO NLLB to {out_dir}")
     print("Next:")
-    print(
-        "  python translate_srt_openvino.py "
-        "-i input/xxx.srt --src jpn_Jpan --tgt zho_Hans --device GPU"
-    )
+    print("  python -m demo_server")
+    print("Demo 翻译读取该目录，设备用 OV_DEVICE（默认 GPU）。")
     return 0
 
 

@@ -52,6 +52,8 @@ def init() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         if "log" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN log TEXT NOT NULL DEFAULT ''")
+        if "model" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN model TEXT")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -91,6 +93,7 @@ def create_job(
     language: str,
     target_lang: str | None,
     client_type: str | None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     job_id = uuid.uuid4().hex
     now = _now()
@@ -99,9 +102,9 @@ def create_job(
             """
             INSERT INTO jobs (
               id, kind, video_path, stream_index, language, target_lang,
-              client_type, status, stage, done_count, total_count,
+              client_type, model, status, stage, done_count, total_count,
               created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, NULL, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, NULL, ?, ?)
             """,
             (
                 job_id,
@@ -111,6 +114,7 @@ def create_job(
                 language,
                 target_lang,
                 client_type,
+                model,
                 "extract" if kind == "transcribe" else "translate",
                 now,
                 now,

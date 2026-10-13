@@ -17,6 +17,7 @@ from demo_server import db, media
 
 WHISPER_DIR = Path(os.environ.get("WHISPER_MODEL", ROOT / "models" / "openvino-whisper-large-v3-int8"))
 NLLB_DIR = Path(os.environ.get("NLLB_MODEL", ROOT / "models" / "nllb-600m-int8"))
+M2M_DIR = Path(os.environ.get("M2M_MODEL", ROOT / "models" / "m2m100-418m-int8"))
 DEVICE = os.environ.get("OV_DEVICE", "GPU").upper()
 CHUNK_SECONDS = 30.0
 
@@ -55,7 +56,7 @@ _cancel = threading.Event()
 _thread: threading.Thread | None = None
 _positions: dict[str, float] = {}
 _whisper: Any = None
-_translator: Any = None
+_translators: dict[str, Any] = {}
 
 
 def note_position(job_id: str, position_sec: float) -> None:
@@ -70,6 +71,7 @@ def models_ready() -> dict[str, bool]:
     return {
         "whisper": WHISPER_DIR.is_dir() and any(WHISPER_DIR.glob("*.xml")),
         "nllb": (NLLB_DIR / "model.bin").is_file(),
+        "m2m": (M2M_DIR / "model.bin").is_file(),
     }
 
 
@@ -206,8 +208,9 @@ def _translate(job: dict[str, Any]) -> None:
     language = job["language"]
     index = int(job["stream_index"])
     target = job["target_lang"]
+    model = _job_model(job)
     source_path = media.artifact_path(video, index, language, "srt")
-    target_path = media.translation_path(video, index, language, target)
+    target_path = media.translation_path(video, index, language, target, model)
     source_label = media.language_label(language)
     target_label = media.language_label(target)
     if target_path.is_file():
@@ -224,7 +227,8 @@ def _translate(job: dict[str, Any]) -> None:
         _copy_cues(job["id"], source_cues, target_path)
         db.remove_job(job["id"])
         return
-    db.append_log(job["id"], f"调用翻译模型，CPU int8，共 {len(source_cues)} 条")
+    _load_translator(job["id"], model)
+    db.append_log(job["id"], f"调用 {_model_label(model)}，CPU int8，共 {len(source_cues)} 条")
     _translate_cues(job, source_cues, target_path, short, target)
 
 
@@ -237,9 +241,9 @@ def _translate_cues(
 ) -> None:
     import transcribe_audio_openvino as asr
 
-    translator = _load_translator()
-    src = media.nllb_code(source_short)
-    tgt = media.nllb_code(target_short)
+    translator = _load_translator(job["id"], _job_model(job))
+    src = source_short
+    tgt = target_short
     db.update_job(job["id"], stage="translate", done_count=0, total_count=len(cues))
     partial = target_path.with_suffix(target_path.suffix + ".partial")
     batch = 8
@@ -273,22 +277,55 @@ def _translate_cues(
     db.append_log(job["id"], f"翻译完成，写入 {target_path.name}")
 
 
-class _Nllb:
+def _job_model(job: dict[str, Any]) -> str:
+    model = str(job.get("model") or "nllb")
+    return model if model in {"nllb", "m2m"} else "nllb"
+
+
+def _model_label(model: str) -> str:
+    return "M2M100 418M" if model == "m2m" else "NLLB 600M"
+
+
+def _load_translator(job_id: str, model: str) -> Callable[[str, str, list[str]], list[str]]:
+    loaded = _translators.get(model)
+    if loaded is None:
+        db.append_log(job_id, f"加载 {_model_label(model)}，CPU int8")
+        loaded = _Ct2Nllb() if model == "nllb" else _Ct2M2m()
+        _translators[model] = loaded
+    return loaded
+
+
+class _Ct2Nllb:
     def __init__(self) -> None:
         from translate_srt import NllbTranslator
 
         self.translator = NllbTranslator(NLLB_DIR, device="cpu", compute_type="int8")
 
     def __call__(self, src: str, tgt: str, texts: list[str]) -> list[str]:
-        translated, _stats = self.translator.translate_texts(texts, src, tgt, beam_size=2, batch_size=16)
+        translated, _stats = self.translator.translate_texts(
+            texts,
+            media.nllb_code(src),
+            media.nllb_code(tgt),
+            beam_size=2,
+            batch_size=16,
+        )
         return translated
 
 
-def _load_translator() -> Callable[[str, str, list[str]], list[str]]:
-    global _translator
-    if _translator is None:
-        _translator = _Nllb()
-    return _translator
+class _Ct2M2m:
+    def __init__(self) -> None:
+        from translate_srt import M2m100Translator
+
+        self.translator = M2m100Translator(M2M_DIR, device="cpu", compute_type="int8")
+
+    def __call__(self, src: str, tgt: str, texts: list[str]) -> list[str]:
+        try:
+            translated, _stats = self.translator.translate_texts(
+                texts, src, tgt, beam_size=2, batch_size=16
+            )
+        except SystemExit as exc:
+            raise RuntimeError(str(exc)) from exc
+        return translated
 
 
 def _copy_cues(job_id: str, cues: list[dict[str, Any]], target_path: Path) -> None:
@@ -354,10 +391,31 @@ def _timestamp(value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + int(ms) / 1000.0
 
 
+def delete_translation_output(job: dict[str, Any]) -> None:
+    """删除这条翻译任务对应的字幕。转写结果和别的模型、语言不动。"""
+    if job.get("kind") != "translate" or not job.get("target_lang"):
+        return
+    try:
+        video = media.resolve_media(job["video_path"])
+    except media.MediaError:
+        return
+    path = media.translation_path(
+        video,
+        int(job["stream_index"]),
+        job["language"],
+        job["target_lang"],
+        _job_model(job),
+    )
+    path.unlink(missing_ok=True)
+    path.with_suffix(path.suffix + ".partial").unlink(missing_ok=True)
+
+
 def srt_response_path(job: dict[str, Any]) -> Path:
     video = media.resolve_media(job["video_path"])
     if job["kind"] == "translate" and job["target_lang"]:
-        path = media.translation_path(video, int(job["stream_index"]), job["language"], job["target_lang"])
+        path = media.translation_path(
+            video, int(job["stream_index"]), job["language"], job["target_lang"], _job_model(job)
+        )
     else:
         path = media.artifact_path(video, int(job["stream_index"]), job["language"], "srt")
     partial = path.with_suffix(path.suffix + ".partial")
@@ -420,7 +478,7 @@ def _legacy_log(job: dict[str, Any]) -> str:
         target_lang = job.get("target_lang") or ""
         source_label = media.language_label(language)
         target_label = media.language_label(target_lang)
-        target = media.translation_path(video, index, language, target_lang)
+        target = media.translation_path(video, index, language, target_lang, _job_model(job))
         if target.is_file():
             count = _cue_count(target)
             if media.short_lang(language) == target_lang:

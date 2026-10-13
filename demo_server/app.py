@@ -193,11 +193,15 @@ def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
     if kind == "transcribe":
         if media.artifact_path(video, index, language, "srt").is_file():
             raise HTTPException(400, "原语言字幕已存在，无需再生成")
-    else:
+    model = None
+    if kind == "translate":
+        model = str(body.get("model") or "nllb")
+        if model not in {"nllb", "m2m"}:
+            raise HTTPException(400, "模型只能是 nllb 或 m2m")
         if media.short_lang(language) == target:
             raise HTTPException(400, "源语言和目标相同，无需翻译")
-        if media.translation_path(video, index, language, target).is_file():
-            raise HTTPException(400, "该语言字幕已存在，无需再翻译")
+        if media.translation_path(video, index, language, target, model).is_file():
+            raise HTTPException(400, "这个模型的该语言字幕已存在，无需再翻译")
     job = db.create_job(
         kind=kind,
         video_path=info["path"],
@@ -205,6 +209,7 @@ def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
         language=language,
         target_lang=target if kind == "translate" else None,
         client_type=client_type,
+        model=model,
     )
     try:
         engine.start_job(job)
@@ -216,7 +221,7 @@ def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
 
 @app.get("/api/jobs")
 def jobs() -> dict[str, Any]:
-    rows = [_public_job(row["id"]) for row in db.list_jobs()]
+    rows = [_public_job(row["id"], row) for row in db.list_jobs() if row and row.get("id")]
     return {"jobs": rows}
 
 
@@ -238,6 +243,8 @@ def delete_job(job_id: str, remove: int = 0) -> dict[str, str]:
     if remove:
         if job["status"] == "running":
             engine.cancel_job(job_id)
+        if job["kind"] == "translate":
+            engine.delete_translation_output(job)
         db.remove_job(job_id)
         return {"status": "deleted"}
     if job["status"] != "running":
@@ -321,9 +328,11 @@ async def job_socket(socket: WebSocket, job_id: str) -> None:
         engine.hub.unsubscribe(job_id, queue)
 
 
-def _public_job(job_id: str) -> dict[str, Any]:
-    job = db.get_job(job_id)
-    assert job is not None
+def _public_job(job_id: str, job: dict[str, Any] | None = None) -> dict[str, Any]:
+    if job is None:
+        job = db.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "任务不存在")
     position = engine.position_of(job_id)
     return {
         "id": job["id"],
@@ -332,6 +341,7 @@ def _public_job(job_id: str) -> dict[str, Any]:
         "streamIndex": job["stream_index"],
         "language": job["language"],
         "targetLang": job["target_lang"],
+        "model": job.get("model"),
         "clientType": job["client_type"],
         "status": job["status"],
         "stage": job["stage"],

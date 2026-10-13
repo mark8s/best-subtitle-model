@@ -23,8 +23,14 @@ def _media_root() -> Path:
 
 MEDIA_ROOT = _media_root()
 VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".mov", ".webm", ".m4v", ".ts"}
-SIDECAR_RE = re.compile(r"\.a\d+\.[a-z0-9]{2,3}(\.[a-z]{2})?\.(wav|srt)$", re.IGNORECASE)
-SUB_ID_RE = re.compile(r"^a(\d+)\.([a-z0-9]{2,3})(?:\.([a-z]{2}))?$", re.IGNORECASE)
+SIDECAR_RE = re.compile(
+    r"\.a\d+\.[a-z0-9]{2,3}(\.[a-z]{2})?(\.m2m)?\.(wav|srt)$",
+    re.IGNORECASE,
+)
+SUB_ID_RE = re.compile(
+    r"^a(\d+)\.([a-z0-9]{2,3})(?:\.([a-z]{2})(?:\.(m2m))?)?$",
+    re.IGNORECASE,
+)
 
 # 容器里的音轨标记 -> 翻译用的短码。文件名仍保留原始标记，例如 ita。
 TAG_TO_SHORT = {
@@ -236,17 +242,27 @@ def artifact_path(video: Path, stream_index: int, language: str, suffix: str) ->
     return video.with_name(f"{video.name}.a{stream_index}.{safe_lang}.{suffix}")
 
 
-def translation_path(video: Path, stream_index: int, language: str, target_lang: str) -> Path:
+def translation_path(
+    video: Path,
+    stream_index: int,
+    language: str,
+    target_lang: str,
+    model: str = "nllb",
+) -> Path:
     safe_lang = re.sub(r"[^a-z0-9]", "", language.lower()) or "und"
     safe_target = re.sub(r"[^a-z]", "", target_lang.lower())
-    return video.with_name(f"{video.name}.a{stream_index}.{safe_lang}.{safe_target}.srt")
+    name = f"{video.name}.a{stream_index}.{safe_lang}.{safe_target}"
+    if model == "m2m":
+        name += ".m2m"
+    return video.with_name(f"{name}.srt")
 
 
-def ready_translations(video: Path, stream_index: int, language: str) -> list[str]:
+def ready_translations(video: Path, stream_index: int, language: str) -> list[dict[str, str]]:
     found = []
     for item in LANGUAGES:
-        if translation_path(video, stream_index, language, item["id"]).is_file():
-            found.append(item["id"])
+        for model in ("nllb", "m2m"):
+            if translation_path(video, stream_index, language, item["id"], model).is_file():
+                found.append({"lang": item["id"], "model": model})
     return found
 
 
@@ -266,9 +282,12 @@ def ai_subtitles(video: Path) -> list[dict]:
             continue
         language = match.group(2).lower()
         target = match.group(3).lower() if match.group(3) else ""
+        model = match.group(4).lower() if match.group(4) else ""
         label = language_label(target or language)
-        if target:
-            label = f"{label} · AI"
+        if target and model == "m2m":
+            label = f"{label} · M2M100"
+        elif target:
+            label = f"{label} · NLLB"
         else:
             label = f"{label}原语言 · AI"
         rows.append(

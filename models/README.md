@@ -8,6 +8,7 @@ models/
   m2m100-418m-int8/
   faster-whisper-large-v3/        # 默认 ASR；存在且含 model.bin 时 transcribe_audio.py 自动用，不必 --model
   openvino-whisper-large-v3-int8/ # Intel GPU ASR；OpenVINO IR，与 faster-whisper 权重不通用
+  openvino-nllb-600m-int8/        # Intel GPU 翻译；OpenVINO IR，与 nllb-600m-int8 不通用
 ```
 
 翻译模型在根目录 `config.yaml` 注册；ASR 分别使用 `transcribe_audio.py`
@@ -26,3 +27,5 @@ OpenVINO large-v3 INT8：
 hf download OpenVINO/whisper-large-v3-int8-ov \
   --local-dir models/openvino-whisper-large-v3-int8
 ```
+
+OpenVINO NLLB 导出步骤见根目录 README「Intel GPU 翻译：实测更慢，Demo 不用」。Demo 翻译不要改用这个目录。

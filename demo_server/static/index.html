@@ -55,7 +55,7 @@
       <div class="jobs-head">
         <div>
           <h1 id="jobs-title">任务</h1>
-          <p>点一行可以看执行日志。进行中的可以停止，不需要的记录可以删除。</p>
+          <p>每条翻译任务对应一个模型和一种目标语言。删除翻译任务会删掉它生成的字幕；音频转文字的字幕不会删。</p>
         </div>
         <button type="button" id="jobs-close">关闭</button>
       </div>
@@ -67,6 +67,7 @@
                 <th>影片</th>
                 <th>类型</th>
                 <th>语言</th>
+                <th>模型</th>
                 <th>状态</th>
                 <th>进度</th>
                 <th>已耗时</th>
@@ -99,6 +100,12 @@
         </div>
         <button type="button" id="translate-close">关闭</button>
       </div>
+      <label class="translate-target">模型
+        <select id="model">
+          <option value="nllb" selected>NLLB 600M</option>
+          <option value="m2m">M2M100 418M</option>
+        </select>
+      </label>
       <label class="translate-target">翻译成 <select id="lang"></select></label>
       <p id="translate-note"></p>
       <div class="actions">
@@ -106,6 +113,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>

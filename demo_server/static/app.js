@@ -21,6 +21,7 @@ const filesEl = document.querySelector("#files");
 const crumbsEl = document.querySelector("#crumbs");
 const trackEl = document.querySelector("#track");
 const langEl = document.querySelector("#lang");
+const modelEl = document.querySelector("#model");
 const videoEl = document.querySelector("#video");
 const captionEl = document.querySelector("#caption");
 const hintEl = document.querySelector("#hint");
@@ -93,7 +94,14 @@ document.querySelector("#translate-confirm").onclick = () => {
 document.querySelector("#translate-view").onclick = (event) => {
   if (event.target.id === "translate-view") closeTranslate();
 };
-langEl.onchange = updateTranslateNote;
+langEl.onchange = async () => {
+  await refreshInfo();
+  updateTranslateNote();
+};
+modelEl.onchange = async () => {
+  await refreshInfo();
+  updateTranslateNote();
+};
 trackEl.onchange = renderTrack;
 subsEl.onchange = () => loadSubtitle();
 subsEl.addEventListener("mousedown", onSubtitleMenuOpen);
@@ -335,7 +343,7 @@ function renderTrack() {
   }
   transcribe.disabled = false;
   translate.disabled = !track.srtReady;
-  const names = track.translations.map((id) => languageName(id));
+  const names = (track.translations || []).map((item) => translationName(item));
   const ready = names.length ? `已有翻译：${names.join("、")}` : "";
   hintEl.textContent = track.srtReady
     ? ready
@@ -346,13 +354,23 @@ function renderTrack() {
       : "还没有抽出这条音轨。";
 }
 
-function openTranslate() {
+async function openTranslate() {
+  if (!state.video) return;
+  const note = document.querySelector("#translate-note");
+  const confirm = document.querySelector("#translate-confirm");
+  document.querySelector("#translate-view").hidden = false;
+  if (note) note.textContent = "正在检查字幕文件…";
+  if (confirm) confirm.disabled = true;
+  await refreshInfo();
   const track = currentTrack();
-  if (!state.video || !track || !track.srtReady) return;
+  if (!track || !track.srtReady) {
+    document.querySelector("#translate-from").textContent = "还没有原语言字幕。";
+    if (note) note.textContent = "请先把音频转成文字。";
+    return;
+  }
   const from = languageName(track.language);
   document.querySelector("#translate-from").textContent = `当前音轨是${from}，原语言字幕会翻译成你选的语言。`;
   updateTranslateNote();
-  document.querySelector("#translate-view").hidden = false;
 }
 
 function closeTranslate() {
@@ -368,17 +386,39 @@ function updateTranslateNote() {
   const from = languageName(track.language);
   const to = languageName(target);
   const sameLang = track.languageShort === target || from === to;
-  const already = (track.translations || []).includes(target);
+  const model = modelEl.value || "nllb";
+  const already = (track.translations || []).some(
+    (item) => item.lang === target && item.model === model,
+  );
   if (confirm) confirm.disabled = sameLang || already;
   if (sameLang) {
     note.textContent = `音轨已经是${from}，和目标相同，无需翻译。`;
     return;
   }
   if (already) {
-    note.textContent = `已经有${to}字幕，无需再翻译。`;
+    note.textContent = `已经有${to}的${modelName(model)}字幕，无需再翻译。`;
     return;
   }
-  note.textContent = `把${from}字幕翻译成${to}。`;
+  note.textContent = `用${modelName(model)}把${from}字幕翻译成${to}。`;
+}
+
+function modelName(model) {
+  return model === "m2m" ? "M2M100" : "NLLB";
+}
+
+function translationName(item) {
+  return `${languageName(item.lang)}（${modelName(item.model)}）`;
+}
+
+function jobLang(job) {
+  if (job.kind !== "translate") return languageName(job.language);
+  return `${languageName(job.language)} → ${languageName(job.targetLang)}`;
+}
+
+function jobModel(job) {
+  if (job.kind !== "translate") return "";
+  if (!job.model) return "—";
+  return modelName(job.model);
 }
 
 function play(start) {
@@ -488,6 +528,7 @@ async function startJob(mode) {
     mode,
     streamIndex: track.streamIndex,
     targetLang: langEl.value,
+    model: mode === "translate" ? modelEl.value || "nllb" : undefined,
   };
   const response = await fetch("/api/jobs", {
     method: "POST",
@@ -506,7 +547,7 @@ async function startJob(mode) {
   hintEl.textContent =
     mode === "transcribe"
       ? "正在把音频转成文字，打开右上角的任务可看进度"
-      : `正在把${fromName}翻译成${targetName}，打开右上角的任务可看进度`;
+      : `正在用${modelName(modelEl.value)}把${fromName}翻译成${targetName}，打开右上角的任务可看进度`;
   if (mode === "translate") openSocket(payload.id);
 }
 
@@ -590,10 +631,7 @@ async function loadJobs() {
     const name = (job.videoPath || "").split("/").pop();
     const progress =
       job.totalCount != null ? `${job.doneCount} / ${job.totalCount}` : String(job.doneCount ?? "");
-    const lang =
-      job.kind === "translate"
-        ? `${languageName(job.language)} → ${languageName(job.targetLang)}`
-        : languageName(job.language);
+    const lang = jobLang(job);
     const film = jobCell(name);
     film.title = job.videoPath || "";
     const status = document.createElement("td");
@@ -621,11 +659,20 @@ async function loadJobs() {
     remove.textContent = "删除";
     remove.onclick = (event) => {
       event.stopPropagation();
-      const running = job.status === "running" ? "这个任务还在跑，删除会先停掉它。 " : "";
-      if (!window.confirm(`${running}删除这条任务记录？`)) return;
-      fetch("/api/jobs/" + job.id + "?remove=1", { method: "DELETE" }).then(() => {
+      const running = job.status === "running" ? "这个任务还在跑，删除会先停掉它。" : "";
+      const message =
+        job.kind === "translate"
+          ? `${running}删除这条任务，并删除${jobLang(job)}的${jobModel(job)}字幕？原语言字幕不会动。`
+          : `${running}删除这条任务记录？音频转文字生成的字幕会保留。`;
+      if (!window.confirm(message)) return;
+      fetch("/api/jobs/" + job.id + "?remove=1", { method: "DELETE" }).then(async () => {
         if (state.detailId === job.id) showJobList();
         loadJobs();
+        if (state.video) {
+          clearSubtitleCacheForVideo();
+          await refreshInfo();
+          loadSubtitle();
+        }
       });
     };
     wrap.append(remove);
@@ -634,6 +681,7 @@ async function loadJobs() {
       film,
       jobCell(kindText(job.kind)),
       jobCell(lang),
+      jobCell(jobModel(job)),
       status,
       jobCell(progress),
       jobCell(elapsedText(job)),
@@ -656,10 +704,7 @@ async function loadDetail() {
   const job = await fetch("/api/jobs/" + state.detailId).then(readJson);
   state.detailRunning = job.status === "running";
   const name = (job.videoPath || "").split("/").pop();
-  const lang =
-    job.kind === "translate"
-      ? `${languageName(job.language)} → ${languageName(job.targetLang)}`
-      : languageName(job.language);
+  const lang = jobLang(job);
   const progress =
     job.totalCount != null ? `${job.doneCount} / ${job.totalCount}` : String(job.doneCount ?? "");
   document.querySelector("#job-detail-title").textContent = name;

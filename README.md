@@ -5,6 +5,7 @@
 - **翻译**：`translate_srt.py`（SRT → SRT）
 - **听写**：`transcribe_audio.py`（音频/视频 → SRT，faster-whisper）
 - **Intel GPU 听写**：`transcribe_audio_openvino.py`（WAV → SRT，OpenVINO GenAI）
+- **Demo**：`python -m demo_server`（听写走 OpenVINO GPU，翻译走 M2M100 418M CPU）
 
 通过 `config.yaml` 切换翻译模型；当前默认：`nllb-600m-int8`。
 
@@ -20,6 +21,7 @@
 | `m2m100-418m-int8` | M2M100 418M INT8 | CTranslate2，约 468MB | [jncraton/m2m100_418M-ct2-int8](https://huggingface.co/jncraton/m2m100_418M-ct2-int8) | `models/m2m100-418m-int8/` | `ja` / `zh` / `en` |
 | （ASR，独立） | faster-whisper（默认 `large-v3`） | 随型号变化 | 见下方 | 见下方 | `ja` / `zh` / `en` / `it` / `ko` … |
 | （ASR，Intel GPU） | OpenVINO Whisper large-v3 INT8 | OpenVINO IR | [OpenVINO/whisper-large-v3-int8-ov](https://huggingface.co/OpenVINO/whisper-large-v3-int8-ov) | `models/openvino-whisper-large-v3-int8/` | `ja` / `zh` / `en` / `it` / `ko` … |
+| （翻译，Intel GPU） | NLLB-200 Distilled 600M | OpenVINO IR | 用 `export_openvino_nllb.py` 从 [facebook/nllb-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M) 导出 | `models/openvino-nllb-600m-int8/` | `jpn_Jpan` / `zho_Hans` / `eng_Latn` |
 
 - NLLB 原模型：[facebook/nllb-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M)（CC-BY-NC-4.0）
 - M2M100 原模型：[facebook/m2m100_418M](https://huggingface.co/facebook/m2m100_418M)（MIT）
@@ -348,6 +350,58 @@ python transcribe_audio_openvino.py \
 
 官方参考：[OpenVINO GenAI WhisperPipeline](https://docs.openvino.ai/2026/api/genai_api/_autosummary/openvino_genai.WhisperPipeline.html)、[Whisper large-v3 INT8 模型](https://huggingface.co/OpenVINO/whisper-large-v3-int8-ov)。
 
+### Intel GPU 翻译：实测更慢，Demo 不用
+
+同一部片、3274 条中文→英文：CTranslate2 NLLB CPU int8 是 **2 分 40 秒**，Optimum 把 NLLB 编到 Intel GPU 后是 **4 分 44 秒**。中文→日语更慢。听写继续用 OpenVINO GPU。Demo 翻译现改用 `models/m2m100-418m-int8`（CTranslate2，CPU）做速度对比，语言码是 `zh` / `en` / `ja`。
+
+慢的原因：矩阵在核显上算，但逐词解码和 beam search 仍在 CPU 的 Python 里。每生成一个词都要和 GPU 交接一次，核显利用率只有大约 25%–60%，CPU 却能到 700% 以上。CTranslate2 的解码循环在 C++ 里，批量更紧，所以纯 CPU 更快。
+
+不要再把 Demo 改回 `nllb_openvino.py`，除非换掉这套逐词 Python 解码。下面只保留导出步骤，避免以后重踩依赖坑。模型仍是 NLLB-200 Distilled 600M；`models/nllb-600m-int8` 与 `models/openvino-nllb-600m-int8` 不能混用。依赖版本钉在 `requirements-openvino-translate.txt`。
+
+**1. 在能访问 Hugging Face 的机器上下载原模型**
+
+设备访问不了 `huggingface.co`。在 Windows 上、项目根目录执行（路径用正斜杠，PowerShell 会把 `\n` 吃成换行，目录名会变成 `modelsnllb-...`）：
+
+```powershell
+py -3.11 -m pip install -U "huggingface_hub[cli]"
+hf download facebook/nllb-200-distilled-600M --local-dir models/nllb-200-distilled-600M
+```
+
+约 2.5GB。目录里应有 `pytorch_model.bin`、`sentencepiece.bpe.model`、`tokenizer.json`。把整个目录拷到设备的 `/DATA/awol-subtitle-model/models/`。
+
+**2. 在 ov-venv 里装导出依赖**
+
+```bash
+source /DATA/ov-venv/bin/activate
+cd /DATA/awol-subtitle-model
+python -m pip install -r requirements-openvino-translate.txt
+python -c "import torch, torchvision; from optimum.intel import OVModelForSeq2SeqLM; print(torch.__version__, torchvision.__version__)"
+```
+
+期望打印 `2.14.1+cpu 0.29.1+cpu`。这一步会装上 OpenVINO 2026.4、`optimum-intel==2.2.0`、配对的 CPU 版 torch/torchvision、`datasets==3.6.0`。
+
+曾经踩过的坑：
+
+- `optimum-intel 1.x` 会把 OpenVINO 2026.4 判成没安装（`is_openvino_available()` 为 `False`）。
+- 只从 PyPI 装 `torchvision` 会报 `operator torchvision::nms does not exist`。必须用 requirements 里的 `+cpu` 配对。
+- `datasets 5.x` 需要更新的 `huggingface-hub`，而 Optimum Intel 2.2 把 hub 限制在 `1.22` 以下，导入会报 `cannot import name 'httpx'`。保持 `datasets==3.6.0`。
+
+**3. 离线导出 IR**
+
+```bash
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+python export_openvino_nllb.py --source models/nllb-200-distilled-600M
+```
+
+转换大约 10–30 分钟。成功时打印 `Saved OpenVINO NLLB to .../models/openvino-nllb-600m-int8`。`TracerWarning` 和 `Can't determine type of OV quantization config` 可以忽略；出现 `int8_asym` 的 NNCF 表格说明 INT8 权重量化已经做完。
+
+```bash
+ls models/openvino-nllb-600m-int8/*.xml
+```
+
+应有 `openvino_encoder_model.xml` 和 `openvino_decoder_model.xml`。导出完成也不要让 Demo 加载这个目录。
+
 ---
 
 ## 本地（Windows）
@@ -373,7 +427,7 @@ python translate_srt.py \
   -o output/The.Pursuit.of.Happyness.zh2.srt \
   --src jpn_Jpan --tgt zho_Hans --device cpu
 ```
- 
+
 M2M100 测试（注意语言码不同）：
   
 ```bash
