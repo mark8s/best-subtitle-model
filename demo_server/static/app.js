@@ -14,6 +14,7 @@ const state = {
   detailId: null,
   detailRunning: false,
   dragging: false,
+  refreshingSubs: false,
 };
 
 const filesEl = document.querySelector("#files");
@@ -95,6 +96,12 @@ document.querySelector("#translate-view").onclick = (event) => {
 langEl.onchange = updateTranslateNote;
 trackEl.onchange = renderTrack;
 subsEl.onchange = () => loadSubtitle();
+subsEl.addEventListener("mousedown", onSubtitleMenuOpen);
+subsEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+    onSubtitleMenuOpen(event);
+  }
+});
 document.querySelector("#play-gate").onclick = () => play(state.offset || 0);
 togglePlayEl.onclick = togglePlay;
 document.querySelector("#full").onclick = toggleFull;
@@ -528,6 +535,41 @@ async function refreshInfo() {
   if (!state.video) return;
   state.info = await fetch("/api/files/info?path=" + encodeURIComponent(state.video.path)).then(readJson);
   renderTrack();
+}
+
+async function onSubtitleMenuOpen(event) {
+  if (!state.video || state.refreshingSubs) {
+    if (state.refreshingSubs) event.preventDefault();
+    return;
+  }
+  const canPicker = typeof subsEl.showPicker === "function";
+  if (canPicker) event.preventDefault();
+  state.refreshingSubs = true;
+  const previous = subsEl.value;
+  try {
+    await refreshInfo();
+    clearSubtitleCacheForVideo();
+    if ([...subsEl.options].some((option) => option.value === previous)) {
+      subsEl.value = previous;
+    }
+    if (previous) loadSubtitle();
+  } finally {
+    state.refreshingSubs = false;
+  }
+  if (!canPicker) return;
+  try {
+    subsEl.showPicker();
+  } catch (_) {
+    subsEl.focus();
+  }
+}
+
+function clearSubtitleCacheForVideo() {
+  if (!state.video) return;
+  const prefix = state.video.path + "|";
+  for (const key of Object.keys(state.subtitleCache)) {
+    if (key.startsWith(prefix)) delete state.subtitleCache[key];
+  }
 }
 
 function jobCell(text) {
