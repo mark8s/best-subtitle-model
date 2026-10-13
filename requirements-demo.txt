@@ -1,0 +1,9 @@
+# Demo 服务。装进 /DATA/ov-venv，和 OpenVINO 同一环境。
+# 听写用该环境里的 OpenVINO。翻译用 CPU 上的 CTranslate2，所以这里也要装上。
+# 系统还需 ffmpeg、ffprobe 在 PATH 里。
+fastapi>=0.115
+uvicorn>=0.32
+websockets>=12
+ctranslate2>=4.0.0
+sentencepiece>=0.1.99
+srt>=3.5.0

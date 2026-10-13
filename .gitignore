@@ -36,6 +36,10 @@ wheels/
 *.mov
 *.avi
 
+# demo 服务的任务库和访问日志
+data/
+logs/
+
 # 模型全部不进 git（只保留说明）
 models/*
 !models/README.md

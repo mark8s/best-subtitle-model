@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI字幕处理Demo</title>
+  <link rel="stylesheet" href="/static/style.css?v=15" />
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <strong>AI字幕处理Demo</strong>
+    </div>
+    <nav>
+      <button type="button" id="tab-jobs">任务</button>
+    </nav>
+  </header>
+  <main id="player-view">
+    <aside>
+      <div class="aside-label">影片</div>
+      <div id="crumbs"></div>
+      <ul id="files"></ul>
+    </aside>
+    <section class="player-col">
+      <div id="stage">
+        <video id="video" playsinline></video>
+        <button type="button" id="play-gate" hidden aria-label="播放"><span></span></button>
+        <div id="caption"></div>
+        <div id="transport" hidden>
+          <button type="button" id="toggle-play" aria-label="播放">▶</button>
+          <span id="time-now">0:00</span>
+          <input id="seek" type="range" min="0" max="0" step="1" value="0" />
+          <span id="time-end">0:00</span>
+          <button type="button" id="full" aria-label="全屏">全屏</button>
+        </div>
+      </div>
+      <div id="panel">
+        <div id="now">先从左边选择影片</div>
+        <div class="meta">
+          <label>音轨 <select id="track"></select></label>
+          <label>字幕 <select id="subtitle"></select></label>
+        </div>
+        <div class="actions">
+          <button type="button" id="transcribe" class="primary" disabled>生成原语言字幕</button>
+          <button type="button" id="translate" disabled>开始翻译</button>
+        </div>
+        <div id="hint"></div>
+      </div>
+    </section>
+  </main>
+  <div id="jobs-view" class="drawer" hidden>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="jobs-title">
+      <div class="jobs-head">
+        <div>
+          <h1 id="jobs-title">任务</h1>
+          <p>点一行可以看执行日志。进行中的可以停止，不需要的记录可以删除。</p>
+        </div>
+        <button type="button" id="jobs-close">关闭</button>
+      </div>
+      <div id="jobs-list">
+        <div class="jobs-card">
+          <table>
+            <thead>
+              <tr>
+                <th>影片</th>
+                <th>类型</th>
+                <th>语言</th>
+                <th>状态</th>
+                <th>进度</th>
+                <th>已耗时</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="job-rows"></tbody>
+          </table>
+          <div id="jobs-empty" class="jobs-empty" hidden>还没有任务</div>
+        </div>
+      </div>
+      <div id="job-detail" hidden>
+        <div class="detail-meta">
+          <button type="button" id="job-back">返回</button>
+          <div>
+            <h2 id="job-detail-title"></h2>
+            <p id="job-detail-sub"></p>
+          </div>
+        </div>
+        <pre id="job-log"></pre>
+      </div>
+    </div>
+  </div>
+  <div id="translate-view" class="modal" hidden>
+    <div class="modal-panel translate-panel" role="dialog" aria-modal="true" aria-labelledby="translate-title">
+      <div class="jobs-head">
+        <div>
+          <h1 id="translate-title">翻译字幕</h1>
+          <p id="translate-from"></p>
+        </div>
+        <button type="button" id="translate-close">关闭</button>
+      </div>
+      <label class="translate-target">翻译成 <select id="lang"></select></label>
+      <p id="translate-note"></p>
+      <div class="actions">
+        <button type="button" id="translate-confirm" class="primary">开始翻译</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/app.js?v=17"></script>
+</body>
+</html>

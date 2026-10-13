@@ -10,6 +10,7 @@ OpenVINO GenAI Whisper 音频转 SRT（Intel GPU / CPU）。
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 import wave
@@ -52,6 +53,19 @@ def format_srt_entry(index: int, start: float, end: float, text: str) -> str:
         f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n"
         f"{text.strip()}\n\n"
     )
+
+
+# Whisper 在片尾、静音里常编出来的固定口号，不是对白。
+_IGNORED_SUBTITLE_RE = re.compile(
+    r"请不吝点赞|明镜与点点栏目|优优独播剧场|yoyo\s*television\s*series\s*exclusive|"
+    r"字幕志愿者|字幕由\s*amara\.org|thanks\s+for\s+watching|please\s+subscribe",
+    re.IGNORECASE,
+)
+
+
+def is_ignored_subtitle(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    return bool(_IGNORED_SUBTITLE_RE.search(compact))
 
 
 def default_output_path(audio: Path, output: Path | None) -> Path:
@@ -367,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
                 entries = entries_from_result(result, cursor, actual_duration)
                 t_write = time.perf_counter()
                 for start, end, text in entries:
+                    if is_ignored_subtitle(text):
+                        continue
                     written_segments += 1
                     output_file.write(format_srt_entry(written_segments, start, end, text))
                 output_file.flush()

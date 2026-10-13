@@ -1,0 +1,13 @@
+# Extra packages for Intel GPU NLLB translation (Optimum seq2seq).
+# Install into the same /DATA/ov-venv as Whisper. Do not mix into .venv.
+#
+# torch / torchvision must be installed from the CPU wheel index first
+# (see README). Do not add them here or pip may pull a mismatched build.
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   python -m pip install -r requirements-openvino-translate.txt
+-r requirements-openvino.txt
+transformers>=4.45.0
+optimum[openvino]
+sentencepiece>=0.2.0
+srt>=3.5.0
+tqdm>=4.66.0
