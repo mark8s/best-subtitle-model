@@ -4,7 +4,7 @@ OpenVINO GenAI Whisper 音频转 SRT（Intel GPU / CPU）。
 
 输入必须是 16 kHz、单声道、PCM s16le WAV。该脚本与 faster-whisper
 后端完全独立，默认加载 OpenVINO INT8 large-v3 并在 Intel GPU 上推理。
-长音频按块推理，避免整片 WAV 转成 Python list 导致 OOM。
+长音频先用 Silero VAD 去掉静音，再按语音段推理，避免整片 WAV 转成 Python list 导致 OOM。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = ROOT / "models" / "openvino-whisper-large-v3-int8"
 SAMPLE_RATE = 16_000
 DEFAULT_CHUNK_SECONDS = 300.0
+WHISPER_WINDOW_SECONDS = 30.0
 
 
 def format_duration(seconds: float) -> str:
@@ -161,6 +162,42 @@ def read_pcm_wav(
     return audio, len(audio) / SAMPLE_RATE
 
 
+def audio_clips(
+    path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    chunk_seconds: float,
+    *,
+    vad: bool,
+    vad_model: Path | None = None,
+    cancel: Any = None,
+    on_vad_progress: Any = None,
+) -> list[tuple[float, float]]:
+    """要送进 Whisper 的 (start, end)。开 VAD 时只保留语音段。"""
+    end = start_seconds + duration_seconds
+    if duration_seconds <= 0:
+        return []
+    if not vad:
+        clips: list[tuple[float, float]] = []
+        cursor = start_seconds
+        while cursor < end - 1e-3:
+            clip_end = min(end, cursor + chunk_seconds)
+            clips.append((cursor, clip_end))
+            cursor = clip_end
+        return clips
+    import silero_vad
+
+    return silero_vad.speech_ranges(
+        path,
+        start_seconds=start_seconds,
+        duration_seconds=duration_seconds,
+        max_chunk_seconds=min(chunk_seconds, WHISPER_WINDOW_SECONDS),
+        model_path=vad_model,
+        cancel=cancel,
+        on_progress=on_vad_progress,
+    )
+
+
 def result_chunks(result: Any) -> list[Any]:
     chunks = getattr(result, "chunks", None)
     if chunks is None:
@@ -226,9 +263,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_CHUNK_SECONDS,
         help=(
-            "Process this many seconds per generate() call "
-            f"(default: {int(DEFAULT_CHUNK_SECONDS)}; avoids OOM on long files)"
+            "Max seconds per generate() call "
+            f"(default: {int(DEFAULT_CHUNK_SECONDS)}). "
+            "With VAD, each speech clip is also capped at 30 seconds."
         ),
+    )
+    parser.add_argument(
+        "--vad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip non-speech with Silero VAD before Whisper (default: enabled; --no-vad to disable)",
+    )
+    parser.add_argument(
+        "--vad-model",
+        type=Path,
+        default=None,
+        help="Silero VAD onnx path (default: models/silero-vad/silero_vad.onnx)",
     )
     parser.add_argument(
         "--list-devices",
@@ -329,11 +379,48 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Task       : {args.task}")
     print(
         f"Clip       : start={args.start:.2f}s | duration={format_duration(audio_duration)}"
-        f" | chunk={format_duration(args.chunk_seconds)}"
+        f" | chunk={format_duration(args.chunk_seconds)} | vad={args.vad}"
     )
-    print("Loading OpenVINO Whisper model ...")
+    vad_model = None if args.vad_model is None else resolve_path(args.vad_model)
+    last_vad_mark = [-1]
+
+    def on_vad_progress(done: float, total: float) -> None:
+        mark = int(done) // 30
+        if mark == last_vad_mark[0]:
+            return
+        last_vad_mark[0] = mark
+        print(f"VAD scan   : {format_srt_timestamp(done)} / {format_srt_timestamp(total)}")
 
     wall_t0 = time.perf_counter()
+    t_vad = time.perf_counter()
+    try:
+        clips = audio_clips(
+            audio_path,
+            args.start,
+            audio_duration,
+            args.chunk_seconds,
+            vad=args.vad,
+            vad_model=vad_model,
+            on_vad_progress=on_vad_progress if args.vad else None,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+    vad_s = time.perf_counter() - t_vad
+    speech_s = sum(clip_end - clip_start for clip_start, clip_end in clips)
+    if args.vad:
+        print(
+            f"VAD        : {len(clips)} clips | speech {format_duration(speech_s)}"
+            f" | skipped {format_duration(max(0.0, audio_duration - speech_s))}"
+            f" | scan {format_duration(vad_s)}"
+        )
+    else:
+        print(f"VAD        : off | chunks={len(clips)}")
+    if not clips:
+        print("[error] 没有检测到语音", file=sys.stderr)
+        return 1
+    print("Loading OpenVINO Whisper model ...")
+
     t_load = time.perf_counter()
     try:
         pipeline = openvino_genai.WhisperPipeline(str(model_path), requested_device)
@@ -357,28 +444,25 @@ def main(argv: list[str] | None = None) -> int:
     written_segments = 0
     write_s = 0.0
     t_infer = time.perf_counter()
-    cursor = args.start
-    clip_end = args.start + audio_duration
     chunk_index = 0
     try:
         with partial_path.open("w", encoding="utf-8", newline="\n") as output_file:
-            while cursor < clip_end - 1e-6:
+            for clip_start, clip_end in clips:
                 chunk_index += 1
-                this_duration = min(args.chunk_seconds, clip_end - cursor)
                 audio, actual_duration = read_pcm_wav(
                     audio_path,
-                    start_seconds=cursor,
-                    duration_seconds=this_duration,
+                    start_seconds=clip_start,
+                    duration_seconds=clip_end - clip_start,
                 )
                 if audio.size == 0:
                     break
                 print(
-                    f"Chunk {chunk_index}: {format_srt_timestamp(cursor)}  "
+                    f"Chunk {chunk_index}: {format_srt_timestamp(clip_start)}  "
                     f"({format_duration(actual_duration)})"
                 )
                 result = pipeline.generate(audio.tolist(), **generation_options)
                 del audio
-                entries = entries_from_result(result, cursor, actual_duration)
+                entries = entries_from_result(result, clip_start, actual_duration)
                 t_write = time.perf_counter()
                 for start, end, text in entries:
                     if is_ignored_subtitle(text):
@@ -387,7 +471,6 @@ def main(argv: list[str] | None = None) -> int:
                     output_file.write(format_srt_entry(written_segments, start, end, text))
                 output_file.flush()
                 write_s += time.perf_counter() - t_write
-                cursor += actual_duration
     except KeyboardInterrupt:
         print("\n" + "-" * 60, file=sys.stderr)
         print(f"Interrupted after {written_segments} segments.", file=sys.stderr)
@@ -411,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 60)
     print("Timing summary")
     print(f"  model load : {format_duration(load_s)}")
+    print(f"  vad scan   : {format_duration(vad_s)}")
     print(f"  transcribe : {format_duration(infer_s)}")
     print(f"  write srt  : {format_duration(write_s)}")
     print(f"  wall clock : {format_duration(wall_s)}")

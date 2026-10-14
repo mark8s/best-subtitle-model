@@ -395,7 +395,8 @@ def extract_wav(video: Path, stream_index: int, wav_path: Path, cancel: callable
 def _encoder_plans(start: float, video: Path, stream_index: int) -> list[list[str]]:
     ffmpeg = require_ffmpeg()
     maps = ["-map", "0:v:0", "-map", f"0:{stream_index}"]
-    tail = ["-copyts", "-c:a", "aac", "-b:a", "128k", "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1"]
+    # 时间戳从 0 起。浏览器的 MediaSource 接不住影片原始时间戳，会把缓冲区拆掉。
+    tail = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1"]
     seek = ["-ss", f"{start:.3f}", "-i", str(video)]
     plans = []
     if os.name != "nt" and Path("/dev/dri/renderD128").exists():
@@ -414,12 +415,31 @@ def _encoder_plans(start: float, video: Path, stream_index: int) -> list[list[st
                 "format=nv12,hwupload",
                 "-c:v",
                 "h264_vaapi",
+                "-bf",
+                "0",
+                "-g",
+                "48",
                 *tail,
             ]
         )
     if os.name == "nt":
         plans.append(
-            [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", *seek, *maps, "-c:v", "h264_qsv", *tail]
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                *seek,
+                *maps,
+                "-c:v",
+                "h264_qsv",
+                "-bf",
+                "0",
+                "-g",
+                "48",
+                *tail,
+            ]
         )
     plans.append(
         [
@@ -436,6 +456,14 @@ def _encoder_plans(start: float, video: Path, stream_index: int) -> list[list[st
             "veryfast",
             "-tune",
             "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "48",
+            "-keyint_min",
+            "48",
+            "-bf",
+            "0",
             *tail,
         ]
     )

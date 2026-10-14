@@ -15,6 +15,7 @@ const state = {
   detailRunning: false,
   dragging: false,
   refreshingSubs: false,
+  live: null,
 };
 
 const filesEl = document.querySelector("#files");
@@ -129,6 +130,11 @@ seekEl.addEventListener("change", () => {
   }
 });
 videoEl.ontimeupdate = paintCue;
+window.addEventListener("error", (event) => {
+  if (!state.player || !String(event.message || "").includes("SourceBuffer")) return;
+  event.preventDefault();
+  failPlayback("播放中断了，再点一次");
+});
 
 loadLanguages();
 loadDir("");
@@ -277,6 +283,12 @@ function renderSubtitles() {
     option.textContent = row.label;
     subsEl.append(option);
   }
+  if (state.live) {
+    const option = document.createElement("option");
+    option.value = "live";
+    option.textContent = state.live.label;
+    subsEl.append(option);
+  }
   if ([...subsEl.options].some((option) => option.value === previous)) subsEl.value = previous;
 }
 
@@ -314,8 +326,9 @@ function parseVtt(text) {
 
 async function loadSubtitle() {
   clearTracks();
-  const row = selectedSubtitle();
   state.subtitleCues = [];
+  if (subsEl.value === "live") return;
+  const row = selectedSubtitle();
   if (!row) return;
   if (state.subtitleCache[cacheKey(row)]) {
     state.subtitleCues = state.subtitleCache[cacheKey(row)];
@@ -416,7 +429,7 @@ function jobLang(job) {
 }
 
 function jobModel(job) {
-  if (job.kind !== "translate") return "";
+  if (job.kind !== "translate") return "Whisper";
   if (!job.model) return "—";
   return modelName(job.model);
 }
@@ -424,6 +437,7 @@ function jobModel(job) {
 function play(start) {
   if (!state.video) return;
   state.restarting = true;
+  state.timeMode = null;
   stopPlayer();
   state.offset = start;
   const track = currentTrack();
@@ -441,7 +455,16 @@ function play(start) {
     document.querySelector("#play-gate").hidden = false;
     return;
   }
-  state.player = mpegts.createPlayer({ type: "mpegts", isLive: true, url });
+  state.player = mpegts.createPlayer(
+    { type: "mpegts", isLive: true, url },
+    {
+      enableWorker: false,
+      liveBufferLatencyChasing: false,
+      autoCleanupMaxBackwardDuration: 90,
+      autoCleanupMinBackwardDuration: 30,
+    },
+  );
+  state.player.on(mpegts.Events.ERROR, () => failPlayback("播放中断了，再点一次"));
   state.player.attachMediaElement(videoEl);
   state.player.load();
   state.player.play();
@@ -449,13 +472,59 @@ function play(start) {
   document.querySelector("#play-gate").hidden = true;
 }
 
+const frozen = { frames: 0, media: 0, since: 0, lastRestart: 0 };
+
+function decodedFrames() {
+  const quality = videoEl.getVideoPlaybackQuality ? videoEl.getVideoPlaybackQuality() : null;
+  return quality ? quality.totalVideoFrames : 0;
+}
+
+// 视频解码器出错时 Chrome 只停画面，声音和 currentTime 照走，也不发 error 事件。
+setInterval(() => {
+  if (!state.player || videoEl.paused || state.restarting) {
+    frozen.since = 0;
+    return;
+  }
+  const frames = decodedFrames();
+  const media = videoEl.currentTime || 0;
+  if (frames !== frozen.frames || media <= frozen.media) {
+    frozen.frames = frames;
+    frozen.media = media;
+    frozen.since = 0;
+    return;
+  }
+  if (!frozen.since) frozen.since = media;
+  if (media - frozen.since < 3) return;
+  const now = performance.now();
+  console.warn("video frozen at", movieTime(), "frames", frames);
+  if (now - frozen.lastRestart < 15000) {
+    failPlayback("画面解码失败，再点一次");
+    return;
+  }
+  frozen.lastRestart = now;
+  frozen.since = 0;
+  hintEl.textContent = "画面卡住了，已从当前位置重新加载";
+  play(Math.floor(movieTime()));
+}, 1000);
+
+function failPlayback(message) {
+  hintEl.textContent = message;
+  stopPlayer();
+  document.querySelector("#play-gate").hidden = false;
+}
+
 function stopPlayer() {
-  if (state.player) {
-    state.player.pause();
-    state.player.unload();
-    state.player.detachMediaElement();
-    state.player.destroy();
-    state.player = null;
+  const player = state.player;
+  state.player = null;
+  if (player) {
+    try {
+      player.pause();
+      player.unload();
+      player.detachMediaElement();
+      player.destroy();
+    } catch {
+      // 缓冲区已经拆掉时，销毁还会再抛一次，这里停掉即可。
+    }
   }
   videoEl.removeAttribute("src");
   videoEl.load();
@@ -499,15 +568,30 @@ function formatClock(seconds) {
 
 function movieTime() {
   const media = videoEl.currentTime || 0;
-  if (media + 1 >= state.offset) return media;
-  return state.offset + media;
+  if (!state.timeMode && media > 0.05) {
+    state.timeMode = media + 1 >= state.offset ? "absolute" : "relative";
+  }
+  if (state.timeMode === "relative") return state.offset + media;
+  return media;
+}
+
+function cueAt(cues, position) {
+  const sorted = cues.slice().sort((a, b) => a.startSec - b.startSec || (a.seq || 0) - (b.seq || 0));
+  let best = null;
+  for (let i = 0; i < sorted.length; i += 1) {
+    const item = sorted[i];
+    const next = sorted[i + 1];
+    const end = next ? Math.min(item.endSec, next.startSec) : item.endSec;
+    if (position >= item.startSec && position < end) best = item;
+  }
+  return best;
 }
 
 function paintCue() {
   const position = movieTime();
   const now = performance.now();
-  const cues = state.subtitleCues.length ? state.subtitleCues : state.cues;
-  const cue = cues.find((item) => position >= item.startSec && position < item.endSec);
+  const cues = subsEl.value === "live" ? state.cues : state.subtitleCues;
+  const cue = cueAt(cues, position);
   captionEl.textContent = cue ? cue.text : "";
   if (!state.dragging && state.info && state.player) {
     const duration = Number(seekEl.max) || position;
@@ -547,8 +631,35 @@ async function startJob(mode) {
   hintEl.textContent =
     mode === "transcribe"
       ? "正在把音频转成文字，打开右上角的任务可看进度"
-      : `正在用${modelName(modelEl.value)}把${fromName}翻译成${targetName}，打开右上角的任务可看进度`;
-  if (mode === "translate") openSocket(payload.id);
+      : `正在用${modelName(modelEl.value)}把${fromName}翻译成${targetName}，字幕里已选中翻译中的句子`;
+  if (mode === "translate") {
+    const model = modelEl.value || "nllb";
+    state.live = {
+      label: `${targetName} · ${modelName(model)} · 翻译中`,
+      fileId: translationFileId(track, langEl.value, model),
+    };
+    renderSubtitles();
+    subsEl.value = "live";
+    loadSubtitle();
+    openSocket(payload.id);
+    ensurePlaying();
+  }
+}
+
+function ensurePlaying() {
+  if (!state.video) return;
+  if (!state.player) {
+    play(Number(seekEl.value) || state.offset || 0);
+    return;
+  }
+  if (videoEl.paused) videoEl.play();
+}
+
+function translationFileId(track, target, model) {
+  const lang = String(track.language || "und").toLowerCase().replace(/[^a-z0-9]/g, "") || "und";
+  const tgt = String(target || "").toLowerCase().replace(/[^a-z]/g, "");
+  const id = `a${track.streamIndex}.${lang}.${tgt}`;
+  return model === "m2m" ? `${id}.m2m` : id;
 }
 
 function openSocket(jobId) {
@@ -565,8 +676,17 @@ function openSocket(jobId) {
       else state.cues.push(message);
     }
     if (message.type === "done") {
+      const fileId = state.live && state.live.fileId;
+      state.live = null;
       hintEl.textContent = "翻译完成";
-      if (state.video) refreshInfo();
+      if (state.video) {
+        refreshInfo().then(() => {
+          if (fileId && [...subsEl.options].some((option) => option.value === fileId)) {
+            subsEl.value = fileId;
+          }
+          loadSubtitle();
+        });
+      }
     }
     if (message.type === "error") hintEl.textContent = message.message;
   };
@@ -733,6 +853,7 @@ function elapsedText(job) {
 
 function statusText(job) {
   if (job.status === "running" && job.stage === "extract") return "抽音频";
+  if (job.status === "running" && job.stage === "vad") return "检测语音";
   if (job.status === "running" && job.stage === "transcribe") return "转文字";
   if (job.status === "running" && job.stage === "translate") return "翻译";
   return { running: "进行中", done: "已完成", stopped: "已停止", failed: "失败" }[job.status] || job.status;

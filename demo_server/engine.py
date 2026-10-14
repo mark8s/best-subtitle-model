@@ -156,49 +156,71 @@ def _write_whisper_srt(job: dict[str, Any], wav_path: Path, srt_path: Path) -> N
     import transcribe_audio_openvino as asr
 
     global _whisper
+    duration = asr.wav_duration_seconds(wav_path)
+    total = max(1, int(duration))
+    db.update_job(job["id"], stage="transcribe", done_count=0, total_count=total)
+    hub.publish(
+        job["id"],
+        {"type": "status", "stage": "transcribe", "doneCount": 0, "totalCount": total},
+    )
+    db.append_log(job["id"], f"开始转写，设备 {DEVICE}，音频 {total} 秒，每段 {int(CHUNK_SECONDS)} 秒")
+
     if _whisper is None:
         db.append_log(job["id"], f"加载 Whisper 模型，设备 {DEVICE}")
         import openvino_genai
 
         _whisper = openvino_genai.WhisperPipeline(str(WHISPER_DIR), DEVICE)
-    duration = asr.wav_duration_seconds(wav_path)
-    total = max(1, int(duration))
-    db.update_job(job["id"], stage="transcribe", done_count=0, total_count=total)
-    db.append_log(job["id"], f"开始转写，设备 {DEVICE}，音频 {total} 秒，每段 {int(CHUNK_SECONDS)} 秒")
+    if _stopped():
+        return
     short = media.short_lang(job["language"])
     options: dict[str, Any] = {"task": "transcribe", "return_timestamps": True}
     if short and short != "und":
         options["language"] = asr.whisper_language_token(short)
-    cursor = 0.0
+    clips = asr.audio_clips(wav_path, 0.0, duration, CHUNK_SECONDS, vad=False)
     index = 0
     partial = srt_path.with_suffix(srt_path.suffix + ".partial")
+    last_logged = -1
     with partial.open("w", encoding="utf-8", newline="\n") as handle:
-        while cursor < duration - 1e-3:
+        for clip_start, clip_end in clips:
             if _stopped():
                 partial.unlink(missing_ok=True)
                 return
-            audio, actual = asr.read_pcm_wav(wav_path, start_seconds=cursor, duration_seconds=CHUNK_SECONDS)
+            audio, actual = asr.read_pcm_wav(
+                wav_path,
+                start_seconds=clip_start,
+                duration_seconds=clip_end - clip_start,
+            )
             if audio.size == 0:
-                break
+                continue
             result = _whisper.generate(audio.tolist(), **options)
             del audio
-            for start, end, text in asr.entries_from_result(result, cursor, actual):
+            for start, end, text in asr.entries_from_result(result, clip_start, actual):
                 if asr.is_ignored_subtitle(text):
                     continue
                 index += 1
                 handle.write(asr.format_srt_entry(index, start, end, text))
             handle.flush()
-            cursor += actual
-            done = min(int(cursor), int(duration))
+            done = min(int(clip_start + actual), int(duration))
             db.update_job(job["id"], done_count=done)
-            db.append_log(job["id"], f"已转写 {done} / {int(duration)} 秒")
             hub.publish(
                 job["id"],
-                {"type": "status", "stage": "transcribe", "doneCount": int(cursor), "totalCount": int(duration)},
+                {
+                    "type": "status",
+                    "stage": "transcribe",
+                    "doneCount": done,
+                    "totalCount": int(duration),
+                },
             )
+            if done - last_logged >= 15:
+                db.append_log(job["id"], f"已转写 {done} / {int(duration)} 秒")
+                last_logged = done
+    if _stopped():
+        partial.unlink(missing_ok=True)
+        return
     if index == 0:
         partial.unlink(missing_ok=True)
         raise RuntimeError("没有转出字幕")
+    db.update_job(job["id"], done_count=int(duration))
     partial.replace(srt_path)
     db.append_log(job["id"], f"转写完成，写入 {srt_path.name}，共 {index} 条")
 
@@ -246,18 +268,19 @@ def _translate_cues(
     tgt = target_short
     db.update_job(job["id"], stage="translate", done_count=0, total_count=len(cues))
     partial = target_path.with_suffix(target_path.suffix + ".partial")
-    batch = 8
     done = 0
+    batch = 16
     with partial.open("w", encoding="utf-8", newline="\n") as handle:
-        for offset in range(0, len(cues), batch):
+        for start in range(0, len(cues), batch):
             if _stopped():
                 partial.unlink(missing_ok=True)
                 return
-            group = cues[offset : offset + batch]
-            texts = translator(src, tgt, [cue["text"] for cue in group])
-            for cue, text in zip(group, texts):
+            chunk = cues[start : start + batch]
+            translated = translator(src, tgt, [cue["text"] for cue in chunk])
+            for offset, cue in enumerate(chunk):
                 done += 1
-                line = text.strip() or cue["text"]
+                raw = translated[offset] if offset < len(translated) else ""
+                line = raw.strip() or cue["text"]
                 handle.write(asr.format_srt_entry(done, cue["startSec"], cue["endSec"], line))
                 hub.publish(
                     job["id"],
