@@ -69,6 +69,19 @@ def is_ignored_subtitle(text: str) -> bool:
     return bool(_IGNORED_SUBTITLE_RE.search(compact))
 
 
+def is_stretched_short_cue(start: float, end: float, text: str) -> bool:
+    """一整段窗口里只有几个词，多半是静音上编出来的句子。"""
+    if end - start < WHISPER_WINDOW_SECONDS - 5:
+        return False
+    words = re.sub(r"\s+", " ", text or "").strip().split(" ")
+    words = [word for word in words if word]
+    if not words:
+        return False
+    if len(words) == 1:
+        return len(words[0]) <= 20
+    return len(words) <= 8
+
+
 def default_output_path(audio: Path, output: Path | None) -> Path:
     if output is None:
         return ROOT / "output" / f"{audio.stem}.openvino.srt"
@@ -465,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                 entries = entries_from_result(result, clip_start, actual_duration)
                 t_write = time.perf_counter()
                 for start, end, text in entries:
-                    if is_ignored_subtitle(text):
+                    if is_ignored_subtitle(text) or is_stretched_short_cue(start, end, text):
                         continue
                     written_segments += 1
                     output_file.write(format_srt_entry(written_segments, start, end, text))

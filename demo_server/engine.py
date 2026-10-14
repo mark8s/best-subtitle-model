@@ -178,6 +178,7 @@ def _write_whisper_srt(job: dict[str, Any], wav_path: Path, srt_path: Path) -> N
         options["language"] = asr.whisper_language_token(short)
     clips = asr.audio_clips(wav_path, 0.0, duration, CHUNK_SECONDS, vad=False)
     index = 0
+    dropped = 0
     partial = srt_path.with_suffix(srt_path.suffix + ".partial")
     last_logged = -1
     with partial.open("w", encoding="utf-8", newline="\n") as handle:
@@ -195,7 +196,10 @@ def _write_whisper_srt(job: dict[str, Any], wav_path: Path, srt_path: Path) -> N
             result = _whisper.generate(audio.tolist(), **options)
             del audio
             for start, end, text in asr.entries_from_result(result, clip_start, actual):
-                if asr.is_ignored_subtitle(text):
+                stretched = asr.is_stretched_short_cue(start, end, text)
+                if stretched:
+                    dropped += 1
+                if asr.is_ignored_subtitle(text) or stretched:
                     continue
                 index += 1
                 handle.write(asr.format_srt_entry(index, start, end, text))
@@ -222,6 +226,8 @@ def _write_whisper_srt(job: dict[str, Any], wav_path: Path, srt_path: Path) -> N
         raise RuntimeError("没有转出字幕")
     db.update_job(job["id"], done_count=int(duration))
     partial.replace(srt_path)
+    if dropped:
+        db.append_log(job["id"], f"丢弃 {dropped} 条占满窗口的短句")
     db.append_log(job["id"], f"转写完成，写入 {srt_path.name}，共 {index} 条")
 
 
