@@ -16,6 +16,8 @@ const state = {
   dragging: false,
   refreshingSubs: false,
   live: null,
+  subtitleWait: null,
+  lastProgressAt: 0,
 };
 
 const filesEl = document.querySelector("#files");
@@ -70,8 +72,14 @@ document.querySelector("#job-back").onclick = () => {
 document.querySelector("#jobs-view").onclick = (event) => {
   if (event.target.id === "jobs-view") closeJobs();
 };
+document.querySelector("#notice-close").onclick = hideNotice;
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  const notice = document.querySelector("#notice");
+  if (notice && !notice.hidden) {
+    hideNotice();
+    return;
+  }
   const translate = document.querySelector("#translate-view");
   if (translate && !translate.hidden) {
     closeTranslate();
@@ -104,7 +112,10 @@ modelEl.onchange = async () => {
   updateTranslateNote();
 };
 trackEl.onchange = renderTrack;
-subsEl.onchange = () => loadSubtitle();
+subsEl.onchange = () => {
+  loadSubtitle();
+  rememberSubtitle(subsEl.value);
+};
 subsEl.addEventListener("mousedown", onSubtitleMenuOpen);
 subsEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
@@ -128,6 +139,7 @@ seekEl.addEventListener("change", () => {
     state.offset = target;
     timeNowEl.textContent = formatClock(target);
   }
+  rememberProgress(target, true);
 });
 videoEl.ontimeupdate = paintCue;
 window.addEventListener("error", (event) => {
@@ -206,8 +218,9 @@ async function loadDir(path) {
 }
 
 async function openVideo(path) {
+  if (state.player && state.video) rememberProgress(progressPosition(), true);
   state.info = await fetch("/api/files/info?path=" + encodeURIComponent(path)).then(readJson);
-  state.video = { path };
+  state.video = { path: state.info.path || path };
   document.querySelector("#now").textContent = state.info.name;
   trackEl.replaceChildren();
   for (const track of state.info.tracks) {
@@ -219,18 +232,69 @@ async function openVideo(path) {
   const preferred = state.info.tracks.find((track) => track.default) || state.info.tracks[0];
   if (preferred) trackEl.value = String(preferred.streamIndex);
   renderTrack();
+  applySavedSubtitle();
   stopPlayer();
-  state.offset = 0;
+  state.subtitleWait = null;
+  hideNotice();
   state.dragging = false;
   const duration = state.info.durationSec || 0;
+  const resume = resumePoint(state.info.positionSec, duration);
+  state.offset = resume;
+  state.lastProgressAt = 0;
   seekEl.max = String(Math.max(0, Math.floor(duration)));
-  seekEl.value = "0";
-  timeNowEl.textContent = "0:00";
+  seekEl.value = String(Math.floor(resume));
+  timeNowEl.textContent = formatClock(resume);
   timeEndEl.textContent = formatClock(duration);
   document.querySelector("#transport").hidden = false;
   document.querySelector("#play-gate").hidden = false;
+  if (resume > 0) hintEl.textContent = `从 ${formatClock(resume)} 继续播放`;
   loadSubtitle();
   loadDir(state.dir);
+}
+
+function progressPosition() {
+  const media = videoEl.currentTime || 0;
+  if (state.timeMode || media > 0.05) return movieTime();
+  return state.offset || Number(seekEl.value) || 0;
+}
+
+function resumePoint(position, duration) {
+  const saved = Number(position) || 0;
+  if (saved < 5) return 0;
+  if (duration && saved > duration - 15) return 0;
+  return saved;
+}
+
+function rememberProgress(position, force) {
+  if (!state.video) return;
+  const now = performance.now();
+  if (!force && now - state.lastProgressAt < 5000) return;
+  state.lastProgressAt = now;
+  const body = JSON.stringify({
+    path: state.video.path,
+    positionSec: Math.max(0, position || 0),
+  });
+  fetch("/api/files/progress", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function applySavedSubtitle() {
+  const saved = state.info && typeof state.info.subtitleId === "string" ? state.info.subtitleId : "";
+  if ([...subsEl.options].some((option) => option.value === saved)) subsEl.value = saved;
+}
+
+function rememberSubtitle(subtitleId) {
+  if (!state.video || subtitleId === "live") return;
+  fetch("/api/files/progress", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: state.video.path, subtitleId: subtitleId || "" }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function currentTrack() {
@@ -438,8 +502,11 @@ function play(start) {
   if (!state.video) return;
   state.restarting = true;
   state.timeMode = null;
-  stopPlayer();
   state.offset = start;
+  const duration = Number(seekEl.max) || start;
+  seekEl.value = String(Math.min(Math.floor(start), duration));
+  timeNowEl.textContent = formatClock(start);
+  stopPlayer();
   const track = currentTrack();
   const index = track ? track.streamIndex : "";
   const url =
@@ -538,6 +605,7 @@ videoEl.addEventListener("play", () => {
 videoEl.addEventListener("pause", () => {
   togglePlayEl.textContent = "▶";
   togglePlayEl.setAttribute("aria-label", "播放");
+  if (state.player) rememberProgress(progressPosition(), true);
 });
 
 function togglePlay() {
@@ -568,7 +636,8 @@ function formatClock(seconds) {
 
 function movieTime() {
   const media = videoEl.currentTime || 0;
-  if (!state.timeMode && media > 0.05) {
+  if (!state.timeMode) {
+    if (media <= 0.05) return (state.offset || 0) + media;
     state.timeMode = media + 1 >= state.offset ? "absolute" : "relative";
   }
   if (state.timeMode === "relative") return state.offset + media;
@@ -602,6 +671,41 @@ function paintCue() {
     state.lastPositionSent = now;
     state.socket.send(JSON.stringify({ type: "position", positionSec: position }));
   }
+  if (state.player && !videoEl.paused && !state.dragging && (state.timeMode || position > 0.05)) {
+    rememberProgress(position, false);
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && state.player && state.video) {
+    rememberProgress(progressPosition(), true);
+  }
+});
+window.addEventListener("pagehide", () => {
+  if (state.player && state.video) rememberProgress(progressPosition(), true);
+});
+
+const MID_PLAY_SEC = 30;
+
+function playbackPosition() {
+  const media = videoEl.currentTime || 0;
+  if (state.player && (state.timeMode || media > 0.05)) return movieTime();
+  return Number(seekEl.value) || state.offset || 0;
+}
+
+let noticeTimer = 0;
+
+function showNotice(title, text) {
+  document.querySelector("#notice-title").textContent = title;
+  document.querySelector("#notice-text").textContent = text;
+  document.querySelector("#notice").hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(hideNotice, 5000);
+}
+
+function hideNotice() {
+  clearTimeout(noticeTimer);
+  document.querySelector("#notice").hidden = true;
 }
 
 async function startJob(mode) {
@@ -643,6 +747,18 @@ async function startJob(mode) {
     loadSubtitle();
     openSocket(payload.id);
     ensurePlaying();
+    const position = playbackPosition();
+    if (position > MID_PLAY_SEC) {
+      state.subtitleWait = { ready: false };
+      showNotice(
+        "字幕还在翻译",
+        "翻译从片头开始。追到你正在看的位置后，字幕会先显示出来。整部翻完后，会再提示一次。",
+      );
+      hintEl.textContent = "翻译从片头进行，追到当前位置后会先显示字幕。";
+    } else {
+      state.subtitleWait = null;
+      hideNotice();
+    }
   }
 }
 
@@ -676,19 +792,52 @@ function openSocket(jobId) {
       else state.cues.push(message);
     }
     if (message.type === "done") {
+      state.subtitleWait = null;
       const fileId = state.live && state.live.fileId;
+      const cues = state.cues.map((cue) => ({
+        seq: cue.seq,
+        startSec: cue.startSec,
+        endSec: cue.endSec,
+        text: cue.text,
+      }));
       state.live = null;
-      hintEl.textContent = "翻译完成";
-      if (state.video) {
-        refreshInfo().then(() => {
-          if (fileId && [...subsEl.options].some((option) => option.value === fileId)) {
+      const finish = async () => {
+        if (state.video) {
+          await refreshInfo();
+          const row = fileId && (state.info.aiSubtitles || []).find((item) => item.id === fileId);
+          if (row && cues.length) {
+            state.subtitleCache[cacheKey(row)] = cues;
+            renderSubtitles();
             subsEl.value = fileId;
+            state.subtitleCues = cues;
+            rememberSubtitle(fileId);
+            const readyText = "整份字幕已经翻译完。播放器继续用刚才推送的句子，不再重新下载字幕。";
+            showNotice("翻译已全部完成", readyText);
+            hintEl.textContent = readyText;
+            return;
           }
-          loadSubtitle();
-        });
-      }
+          if (row) {
+            subsEl.value = fileId;
+            rememberSubtitle(fileId);
+            await loadSubtitle();
+            if (subsEl.value === fileId) {
+              const readyText = "整份字幕已经翻译完，并加载到播放器。在这之前，追到播放位置的句子可能已经显示过。";
+              showNotice("翻译已全部完成", readyText);
+              hintEl.textContent = readyText;
+              return;
+            }
+          }
+        }
+        hintEl.textContent = "翻译结束，还没有找到字幕文件。";
+        showNotice("翻译已结束", "任务结束了，但还没有找到生成好的字幕文件。");
+      };
+      finish();
     }
-    if (message.type === "error") hintEl.textContent = message.message;
+    if (message.type === "error") {
+      state.subtitleWait = null;
+      hideNotice();
+      hintEl.textContent = message.message;
+    }
   };
 }
 

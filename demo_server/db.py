@@ -1,4 +1,4 @@
-"""Demo 任务库。只记每一次听写或翻译，文件路径不进库。"""
+"""Demo 任务库。记每一次听写或翻译，以及每部影片的播放进度。"""
 
 from __future__ import annotations
 
@@ -54,6 +54,18 @@ def init() -> None:
             conn.execute("ALTER TABLE jobs ADD COLUMN log TEXT NOT NULL DEFAULT ''")
         if "model" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN model TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS playback (
+              video_path    TEXT PRIMARY KEY,
+              position_sec  REAL NOT NULL,
+              updated_at    TEXT NOT NULL
+            )
+            """
+        )
+        playback_columns = {row[1] for row in conn.execute("PRAGMA table_info(playback)")}
+        if "subtitle_id" not in playback_columns:
+            conn.execute("ALTER TABLE playback ADD COLUMN subtitle_id TEXT")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -157,6 +169,56 @@ def append_log(job_id: str, message: str) -> None:
 def remove_job(job_id: str) -> None:
     with _lock, connect() as conn:
         conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
+def playback_position(video_path: str) -> float:
+    return float(playback_prefs(video_path)["positionSec"])
+
+
+def playback_prefs(video_path: str) -> dict[str, Any]:
+    with _lock, connect() as conn:
+        row = conn.execute(
+            "SELECT position_sec, subtitle_id FROM playback WHERE video_path = ?",
+            (video_path,),
+        ).fetchone()
+    if row is None:
+        return {"positionSec": 0.0, "subtitleId": ""}
+    return {
+        "positionSec": max(0.0, float(row["position_sec"] or 0)),
+        "subtitleId": str(row["subtitle_id"] or ""),
+    }
+
+
+def save_playback(video_path: str, position_sec: float) -> None:
+    now = _now()
+    position = max(0.0, float(position_sec))
+    with _lock, connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO playback (video_path, position_sec, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(video_path) DO UPDATE SET
+              position_sec = excluded.position_sec,
+              updated_at = excluded.updated_at
+            """,
+            (video_path, position, now),
+        )
+
+
+def save_subtitle(video_path: str, subtitle_id: str) -> None:
+    now = _now()
+    chosen = str(subtitle_id or "")
+    with _lock, connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO playback (video_path, position_sec, subtitle_id, updated_at)
+            VALUES (?, 0, ?, ?)
+            ON CONFLICT(video_path) DO UPDATE SET
+              subtitle_id = excluded.subtitle_id,
+              updated_at = excluded.updated_at
+            """,
+            (video_path, chosen, now),
+        )
 
 
 def finish_job(job_id: str, status: str, error: str | None = None) -> None:

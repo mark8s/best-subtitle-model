@@ -72,9 +72,38 @@ def files(path: str = "") -> dict[str, Any]:
 @app.get("/api/files/info")
 def file_info(path: str) -> dict[str, Any]:
     try:
-        return media.file_info(path)
+        info = media.file_info(path)
     except media.MediaError as exc:
         raise HTTPException(400, str(exc)) from exc
+    prefs = db.playback_prefs(info["path"])
+    info["positionSec"] = prefs["positionSec"]
+    info["subtitleId"] = prefs["subtitleId"]
+    return info
+
+
+@app.post("/api/files/progress")
+def save_progress(body: dict[str, Any]) -> dict[str, Any]:
+    rel = str(body.get("path") or "")
+    try:
+        info = media.file_info(rel)
+    except media.MediaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if "positionSec" not in body and "subtitleId" not in body:
+        raise HTTPException(400, "没有要保存的内容")
+    position = db.playback_position(info["path"])
+    if "positionSec" in body:
+        try:
+            position = float(body.get("positionSec") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "播放进度不对") from exc
+        duration = float(info.get("durationSec") or 0)
+        position = max(0.0, position)
+        if duration > 0:
+            position = min(position, duration)
+        db.save_playback(info["path"], position)
+    if "subtitleId" in body:
+        db.save_subtitle(info["path"], str(body.get("subtitleId") or ""))
+    return {"positionSec": position, "subtitleId": db.playback_prefs(info["path"])["subtitleId"]}
 
 
 @app.get("/api/files/subtitles")
@@ -159,8 +188,6 @@ def _default_audio_index(video) -> int:
 
 @app.post("/api/jobs")
 def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
-    if engine.job_busy() or db.running_job():
-        raise HTTPException(409, "已有任务在跑")
     kind = body.get("mode") or body.get("kind")
     if kind not in {"transcribe", "translate"}:
         raise HTTPException(400, "mode 只能是 transcribe 或 translate")
@@ -202,6 +229,10 @@ def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
             raise HTTPException(400, "源语言和目标相同，无需翻译")
         if media.translation_path(video, index, language, target, model).is_file():
             raise HTTPException(400, "这个模型的该语言字幕已存在，无需再翻译")
+    if kind == "transcribe" and engine.transcribe_busy():
+        raise HTTPException(409, "已有听写任务在跑")
+    if kind == "translate" and engine.translation_busy(info["path"], index, str(target), str(model)):
+        raise HTTPException(409, "这条翻译已经在跑")
     job = db.create_job(
         kind=kind,
         video_path=info["path"],

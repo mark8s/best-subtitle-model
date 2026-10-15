@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI字幕处理Demo</title>
-  <link rel="stylesheet" href="/static/style.css?v=15" />
+  <link rel="stylesheet" href="/static/style.css?v=17" />
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
 </head>
 <body>
@@ -28,6 +28,13 @@
         <video id="video" playsinline></video>
         <button type="button" id="play-gate" hidden aria-label="播放"><span></span></button>
         <div id="caption"></div>
+        <div id="notice" hidden>
+          <div class="notice-card">
+            <strong id="notice-title"></strong>
+            <p id="notice-text"></p>
+            <button type="button" id="notice-close">知道了</button>
+          </div>
+        </div>
         <div id="transport" hidden>
           <button type="button" id="toggle-play" aria-label="播放">▶</button>
           <span id="time-now">0:00</span>
@@ -113,6 +120,6 @@
       </div>
     </div>
   </div>
-  <script src="/static/app.js?v=25"></script>
+  <script src="/static/app.js?v=33"></script>
 </body>
 </html>

@@ -52,11 +52,12 @@ class Hub:
 
 hub = Hub()
 _runner_lock = threading.Lock()
-_cancel = threading.Event()
-_thread: threading.Thread | None = None
+_runners: dict[str, dict[str, Any]] = {}
+_tls = threading.local()
 _positions: dict[str, float] = {}
 _whisper: Any = None
 _translators: dict[str, Any] = {}
+_model_locks: dict[str, threading.RLock] = {}
 
 
 def note_position(job_id: str, position_sec: float) -> None:
@@ -75,36 +76,96 @@ def models_ready() -> dict[str, bool]:
     }
 
 
+def _model_lock(model: str) -> threading.RLock:
+    with _runner_lock:
+        lock = _model_locks.get(model)
+        if lock is None:
+            lock = threading.RLock()
+            _model_locks[model] = lock
+        return lock
+
+
+def _alive_runners() -> list[dict[str, Any]]:
+    dead = [job_id for job_id, item in _runners.items() if not item["thread"].is_alive()]
+    for job_id in dead:
+        _runners.pop(job_id, None)
+    return list(_runners.values())
+
+
 def job_busy() -> bool:
-    return _thread is not None and _thread.is_alive()
+    with _runner_lock:
+        return any(item["thread"].is_alive() for item in _alive_runners())
+
+
+def transcribe_busy() -> bool:
+    with _runner_lock:
+        return any(item["kind"] == "transcribe" and item["thread"].is_alive() for item in _alive_runners())
+
+
+def translation_busy(video_path: str, stream_index: int, target_lang: str, model: str) -> bool:
+    key = (video_path, int(stream_index), target_lang, model or "nllb")
+    with _runner_lock:
+        return any(
+            item["kind"] == "translate" and item["key"] == key and item["thread"].is_alive()
+            for item in _alive_runners()
+        )
+
+
+def _translation_key(job: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        job.get("video_path"),
+        int(job.get("stream_index") or 0),
+        job.get("target_lang"),
+        str(job.get("model") or "nllb"),
+    )
 
 
 def start_job(job: dict[str, Any]) -> None:
-    global _thread
     with _runner_lock:
-        if job_busy():
-            raise RuntimeError("已有任务在跑")
-        _cancel.clear()
-        _thread = threading.Thread(target=_run_job, args=(job,), name="demo-job", daemon=True)
-        _thread.start()
+        alive = _alive_runners()
+        if job["kind"] == "transcribe" and any(item["kind"] == "transcribe" for item in alive):
+            raise RuntimeError("已有听写任务在跑")
+        if job["kind"] == "translate":
+            key = _translation_key(job)
+            if any(item["kind"] == "translate" and item["key"] == key for item in alive):
+                raise RuntimeError("这条翻译已经在跑")
+        cancel = threading.Event()
+        thread = threading.Thread(
+            target=_run_job,
+            args=(job, cancel),
+            name=f"demo-{job['kind']}-{job['id'][:8]}",
+            daemon=True,
+        )
+        _runners[job["id"]] = {
+            "thread": thread,
+            "cancel": cancel,
+            "kind": job["kind"],
+            "key": _translation_key(job) if job["kind"] == "translate" else None,
+        }
+        thread.start()
 
 
 def cancel_job(job_id: str) -> None:
     job = db.get_job(job_id)
     if not job or job["status"] != "running":
         return
-    _cancel.set()
+    with _runner_lock:
+        item = _runners.get(job_id)
+        if item:
+            item["cancel"].set()
     db.append_log(job_id, "已停止")
     db.finish_job(job_id, "stopped")
     hub.publish(job_id, {"type": "status", "status": "stopped"})
 
 
 def _stopped() -> bool:
-    return _cancel.is_set()
+    cancel = getattr(_tls, "cancel", None)
+    return cancel is not None and cancel.is_set()
 
 
-def _run_job(job: dict[str, Any]) -> None:
+def _run_job(job: dict[str, Any], cancel: threading.Event) -> None:
     job_id = job["id"]
+    _tls.cancel = cancel
     try:
         if job["kind"] == "transcribe":
             _transcribe(job)
@@ -123,6 +184,12 @@ def _run_job(job: dict[str, Any]) -> None:
         db.append_log(job_id, f"失败：{exc}")
         db.finish_job(job_id, "failed", str(exc))
         hub.publish(job_id, {"type": "error", "message": str(exc)})
+    finally:
+        _tls.cancel = None
+        with _runner_lock:
+            current = _runners.get(job_id)
+            if current and current["cancel"] is cancel:
+                _runners.pop(job_id, None)
 
 
 def _transcribe(job: dict[str, Any]) -> None:
@@ -316,12 +383,13 @@ def _model_label(model: str) -> str:
 
 
 def _load_translator(job_id: str, model: str) -> Callable[[str, str, list[str]], list[str]]:
-    loaded = _translators.get(model)
-    if loaded is None:
-        db.append_log(job_id, f"加载 {_model_label(model)}，CPU int8")
-        loaded = _Ct2Nllb() if model == "nllb" else _Ct2M2m()
-        _translators[model] = loaded
-    return loaded
+    with _model_lock(model):
+        loaded = _translators.get(model)
+        if loaded is None:
+            db.append_log(job_id, f"加载 {_model_label(model)}，CPU int8")
+            loaded = _Ct2Nllb() if model == "nllb" else _Ct2M2m()
+            _translators[model] = loaded
+        return loaded
 
 
 class _Ct2Nllb:
@@ -331,13 +399,14 @@ class _Ct2Nllb:
         self.translator = NllbTranslator(NLLB_DIR, device="cpu", compute_type="int8")
 
     def __call__(self, src: str, tgt: str, texts: list[str]) -> list[str]:
-        translated, _stats = self.translator.translate_texts(
-            texts,
-            media.nllb_code(src),
-            media.nllb_code(tgt),
-            beam_size=2,
-            batch_size=16,
-        )
+        with _model_lock("nllb"):
+            translated, _stats = self.translator.translate_texts(
+                texts,
+                media.nllb_code(src),
+                media.nllb_code(tgt),
+                beam_size=2,
+                batch_size=16,
+            )
         return translated
 
 
@@ -349,9 +418,10 @@ class _Ct2M2m:
 
     def __call__(self, src: str, tgt: str, texts: list[str]) -> list[str]:
         try:
-            translated, _stats = self.translator.translate_texts(
-                texts, src, tgt, beam_size=2, batch_size=16
-            )
+            with _model_lock("m2m"):
+                translated, _stats = self.translator.translate_texts(
+                    texts, src, tgt, beam_size=2, batch_size=16
+                )
         except SystemExit as exc:
             raise RuntimeError(str(exc)) from exc
         return translated
