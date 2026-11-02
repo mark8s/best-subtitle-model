@@ -71,12 +71,12 @@ python -m demo_server
 ```
 
 浏览器打开 `http://机器IP:8080`。8080 已被占用时：
-
+   
 ```bash
 fuser -k 8080/tcp
 python -m demo_server
 ```
 
-影片不在 `/DATA/videos` 时，启动前设置 `MEDIA_ROOT`。
+影片不在 `/DATA/videos` 时，启动前设置 `MEDIA_ROOT`。   
 
 听写先用 Silero 找出人声，一段确定后就送给 Whisper，不必等整片扫完。翻译在网页里选 M2M100 或 NLLB。
