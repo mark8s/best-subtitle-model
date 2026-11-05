@@ -13,7 +13,7 @@ ls -l /dev/dri
 # 应有 card0 和 renderD128
 ```
 
-`/DATA` 上经常不能建 symlink，venv 要 `--copies`，并把 `libpython` 拷进去：
+`/DATA` 上经常不能建 symlink，venv 要 `--copies`，并把 `libpython` 拷进去：  
 
 ```bash
 /usr/awol/python/bin/python3.11 -m venv --copies --without-pip /DATA/ov-venv

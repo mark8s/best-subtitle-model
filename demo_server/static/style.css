@@ -245,6 +245,7 @@ video::-webkit-media-text-track-container {
   max-width: 82%;
   margin: 0 auto;
   text-align: center;
+  white-space: pre-line;
   font-size: 26px;
   font-weight: 600;
   line-height: 1.35;
