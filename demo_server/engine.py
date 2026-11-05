@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -292,7 +293,7 @@ def _write_whisper_srt(job: dict[str, Any], wav_path: Path, srt_path: Path) -> N
         partial.unlink(missing_ok=True)
         raise RuntimeError("没有转出字幕")
     db.update_job(job["id"], done_count=int(duration))
-    partial.replace(srt_path)
+    _publish_partial(partial, srt_path)
     if dropped:
         db.append_log(job["id"], f"丢弃 {dropped} 条占满窗口的短句")
     db.append_log(job["id"], f"转写完成，写入 {srt_path.name}，共 {index} 条")
@@ -353,7 +354,7 @@ def _translate_cues(
             for offset, cue in enumerate(chunk):
                 done += 1
                 raw = translated[offset] if offset < len(translated) else ""
-                line = raw.strip() or cue["text"]
+                line = _bilingual_line(cue["text"], raw)
                 handle.write(asr.format_srt_entry(done, cue["startSec"], cue["endSec"], line))
                 hub.publish(
                     job["id"],
@@ -369,8 +370,30 @@ def _translate_cues(
             db.update_job(job["id"], done_count=done, total_count=len(cues))
             if done == len(cues) or done % 80 == 0:
                 db.append_log(job["id"], f"已翻译 {done} / {len(cues)} 条")
-    partial.replace(target_path)
+    _publish_partial(partial, target_path)
     db.append_log(job["id"], f"翻译完成，写入 {target_path.name}")
+
+
+def _publish_partial(partial: Path, target: Path) -> None:
+    """临时文件换成正式字幕。/DATA 上 rename 可能报 ENOENT，这时改为复制。"""
+    if not partial.is_file():
+        raise FileNotFoundError(partial)
+    try:
+        partial.replace(target)
+    except OSError:
+        shutil.copyfile(partial, target)
+        partial.unlink(missing_ok=True)
+
+
+def _bilingual_line(source: str, translated: str) -> str:
+    """原文在上，译文在下。译文为空或与原文相同则只留原文。"""
+    original = str(source or "").strip()
+    target = str(translated or "").strip()
+    if not original:
+        return target
+    if not target or target == original:
+        return original
+    return f"{original}\n{target}"
 
 
 def _job_model(job: dict[str, Any]) -> str:
