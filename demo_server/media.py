@@ -392,14 +392,92 @@ def extract_wav(video: Path, stream_index: int, wav_path: Path, cancel: callable
         raise MediaError(err or "抽取音频失败")
 
 
+_ffmpeg_encoders: set[str] | None = None
+
+
+def _ffmpeg_encoder_names() -> set[str]:
+    global _ffmpeg_encoders
+    if _ffmpeg_encoders is not None:
+        return _ffmpeg_encoders
+    names: set[str] = set()
+    try:
+        proc = subprocess.run(
+            [require_ffmpeg(), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].startswith("V"):
+                names.add(parts[1])
+    except (OSError, subprocess.TimeoutExpired):
+        names = set()
+    _ffmpeg_encoders = names
+    return names
+
+
 def _encoder_plans(start: float, video: Path, stream_index: int) -> list[list[str]]:
     ffmpeg = require_ffmpeg()
     maps = ["-map", "0:v:0", "-map", f"0:{stream_index}"]
     # 时间戳从 0 起。浏览器的 MediaSource 接不住影片原始时间戳，会把缓冲区拆掉。
     tail = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "pipe:1"]
     seek = ["-ss", f"{start:.3f}", "-i", str(video)]
+    rate = ["-bf", "0", "-g", "48"]
     plans = []
-    if os.name != "nt" and Path("/dev/dri/renderD128").exists():
+    dri = os.name != "nt" and Path("/dev/dri/renderD128").exists()
+    encoders = _ffmpeg_encoder_names()
+
+    def has_encoder(name: str) -> bool:
+        return not encoders or name in encoders
+
+    if dri and has_encoder("h264_vaapi"):
+        # 解码和编码都在核显上。H.265 软解是播放时 CPU 的大头。
+        plans.append(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                "/dev/dri/renderD128",
+                "-hwaccel_output_format",
+                "vaapi",
+                *seek,
+                *maps,
+                "-vf",
+                "scale_vaapi=format=nv12",
+                "-c:v",
+                "h264_vaapi",
+                *rate,
+                *tail,
+            ]
+        )
+    if has_encoder("h264_qsv"):
+        plans.append(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-hwaccel",
+                "qsv",
+                "-hwaccel_output_format",
+                "qsv",
+                *seek,
+                *maps,
+                "-c:v",
+                "h264_qsv",
+                *rate,
+                *tail,
+            ]
+        )
+    if dri and has_encoder("h264_vaapi"):
         plans.append(
             [
                 ffmpeg,
@@ -415,29 +493,7 @@ def _encoder_plans(start: float, video: Path, stream_index: int) -> list[list[st
                 "format=nv12,hwupload",
                 "-c:v",
                 "h264_vaapi",
-                "-bf",
-                "0",
-                "-g",
-                "48",
-                *tail,
-            ]
-        )
-    if os.name == "nt":
-        plans.append(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                *seek,
-                *maps,
-                "-c:v",
-                "h264_qsv",
-                "-bf",
-                "0",
-                "-g",
-                "48",
+                *rate,
                 *tail,
             ]
         )
