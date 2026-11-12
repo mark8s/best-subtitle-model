@@ -70,7 +70,7 @@ cd /DATA/awol-subtitle-model
 python -m demo_server
 ```
 
-浏览器打开 `http://机器IP:8080`。8080 已被占用时：
+浏览器打开 `http://机器IP:8080`。8080 已被占用时：  
    
 ```bash
 fuser -k 8080/tcp

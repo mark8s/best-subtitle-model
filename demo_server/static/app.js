@@ -16,6 +16,7 @@ const state = {
   dragging: false,
   refreshingSubs: false,
   live: null,
+  bilingualNoted: false,
   subtitleWait: null,
   lastProgressAt: 0,
 };
@@ -659,9 +660,23 @@ function cueAt(cues, position) {
 function paintCue() {
   const position = movieTime();
   const now = performance.now();
-  const cues = subsEl.value === "live" ? state.cues : state.subtitleCues;
-  const cue = cueAt(cues, position);
+  let cue = null;
+  let fromLive = false;
+  if (state.live && subsEl.value) {
+    cue = cueAt(state.cues, position);
+    fromLive = !!cue;
+  }
+  if (!cue) {
+    const cues = subsEl.value === "live" ? state.cues : state.subtitleCues;
+    cue = cueAt(cues, position);
+  }
   captionEl.textContent = cue ? cue.text : "";
+  if (fromLive && !state.bilingualNoted) {
+    state.bilingualNoted = true;
+    const text = "这一句已经译完，从原文换成双语。后面译完的句子也会马上换，还没译到的仍显示原文。";
+    showNotice("已换成双语", text);
+    hintEl.textContent = text;
+  }
   if (!state.dragging && state.info && state.player) {
     const duration = Number(seekEl.max) || position;
     seekEl.value = String(Math.min(Math.floor(position), duration));
@@ -684,14 +699,6 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("pagehide", () => {
   if (state.player && state.video) rememberProgress(progressPosition(), true);
 });
-
-const MID_PLAY_SEC = 30;
-
-function playbackPosition() {
-  const media = videoEl.currentTime || 0;
-  if (state.player && (state.timeMode || media > 0.05)) return movieTime();
-  return Number(seekEl.value) || state.offset || 0;
-}
 
 let noticeTimer = 0;
 
@@ -735,30 +742,24 @@ async function startJob(mode) {
   hintEl.textContent =
     mode === "transcribe"
       ? "正在把音频转成文字，打开右上角的任务可看进度"
-      : `正在用${modelName(modelEl.value)}把${fromName}翻译成${targetName}，字幕里已选中翻译中的句子`;
+      : `正在用${modelName(modelEl.value)}把${fromName}翻译成${targetName}。译完的句子会马上从原文换成双语。`;
   if (mode === "translate") {
     const model = modelEl.value || "nllb";
+    state.bilingualNoted = false;
     state.live = {
       label: `${targetName} · ${modelName(model)} · 翻译中`,
       fileId: translationFileId(track, langEl.value, model),
     };
     renderSubtitles();
-    subsEl.value = "live";
+    const sourceId = sourceSubtitleId(track);
+    if (sourceId && [...subsEl.options].some((option) => option.value === sourceId)) {
+      subsEl.value = sourceId;
+    }
     loadSubtitle();
     openSocket(payload.id);
     ensurePlaying();
-    const position = playbackPosition();
-    if (position > MID_PLAY_SEC) {
-      state.subtitleWait = { ready: false };
-      showNotice(
-        "字幕还在翻译",
-        "翻译从片头开始。追到你正在看的位置后，字幕会先显示出来。整部翻完后，会再提示一次。",
-      );
-      hintEl.textContent = "翻译从片头进行，追到当前位置后会先显示字幕。";
-    } else {
-      state.subtitleWait = null;
-      hideNotice();
-    }
+    state.subtitleWait = null;
+    hideNotice();
   }
 }
 
@@ -769,6 +770,12 @@ function ensurePlaying() {
     return;
   }
   if (videoEl.paused) videoEl.play();
+}
+
+function sourceSubtitleId(track) {
+  const rows = (state.info && state.info.aiSubtitles) || [];
+  const row = rows.find((item) => item.streamIndex === track.streamIndex && !item.target);
+  return row ? row.id : "";
 }
 
 function translationFileId(track, target, model) {
@@ -790,6 +797,7 @@ function openSocket(jobId) {
       const existing = state.cues.findIndex((cue) => cue.seq === message.seq);
       if (existing >= 0) state.cues[existing] = message;
       else state.cues.push(message);
+      paintCue();
     }
     if (message.type === "done") {
       state.subtitleWait = null;
@@ -811,7 +819,7 @@ function openSocket(jobId) {
             subsEl.value = fileId;
             state.subtitleCues = cues;
             rememberSubtitle(fileId);
-            const readyText = "整份字幕已经翻译完。播放器继续用刚才推送的句子，不再重新下载字幕。";
+            const readyText = "整份字幕已经翻译完，播放器已从原文切换成双语。";
             showNotice("翻译已全部完成", readyText);
             hintEl.textContent = readyText;
             return;
@@ -821,7 +829,7 @@ function openSocket(jobId) {
             rememberSubtitle(fileId);
             await loadSubtitle();
             if (subsEl.value === fileId) {
-              const readyText = "整份字幕已经翻译完，并加载到播放器。在这之前，追到播放位置的句子可能已经显示过。";
+              const readyText = "整份字幕已经翻译完，播放器已从原文切换成双语。";
               showNotice("翻译已全部完成", readyText);
               hintEl.textContent = readyText;
               return;

@@ -386,14 +386,14 @@ def _publish_partial(partial: Path, target: Path) -> None:
 
 
 def _bilingual_line(source: str, translated: str) -> str:
-    """原文在上，译文在下。译文为空或与原文相同则只留原文。"""
+    """译文在上，原文在下。译文为空或与原文相同则只留原文。"""
     original = str(source or "").strip()
     target = str(translated or "").strip()
     if not original:
         return target
     if not target or target == original:
         return original
-    return f"{original}\n{target}"
+    return f"{target}\n{original}"
 
 
 def _job_model(job: dict[str, Any]) -> str:
